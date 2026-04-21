@@ -3,6 +3,7 @@ import os, time, requests, logging
 from datetime import datetime
 
 LOG_DIR = os.path.expanduser("~/tao_logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 JOBS = {
     "vtrust_monitor": {"log": os.path.join(LOG_DIR, "vtrust_monitor.log"), "max_silence_hours": 7},
     "rebalancer": {"log": os.path.join(LOG_DIR, "rebalancer.log"), "max_silence_hours": 25},
