@@ -1,1 +1,1 @@
-worker: python tao_dashboard.py
+web: python3 serve.py
