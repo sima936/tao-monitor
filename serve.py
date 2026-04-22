@@ -40,7 +40,7 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         try:
             url = 'https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd,gbp'
             req = urllib.request.Request(url, headers={'User-Agent': 'TAO-Monitor/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -62,7 +62,7 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 'Authorization': TAOSTATS_KEY,
                 'User-Agent': 'TAO-Monitor/1.0'
             })
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -80,11 +80,12 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             params = parse_qs(urlparse(self.path).query)
             netuid = params.get('netuid', ['0'])[0]
             url = f'https://api.taostats.io/api/dtao/validator/yield/latest/v1?netuid={netuid}&limit=200'
+            print(f'Fetching yield: {url}', flush=True)
             req = urllib.request.Request(url, headers={
                 'Authorization': TAOSTATS_KEY,
                 'User-Agent': 'TAO-Monitor/1.0'
             })
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
