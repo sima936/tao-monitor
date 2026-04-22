@@ -452,6 +452,8 @@
         <th>Target</th>
         <th>Drift</th>
         <th>vTrust</th>
+        <th>7D APY</th>
+        <th>Daily (τ)</th>
         <th>Status</th>
       </tr>
     </thead>
@@ -512,6 +514,21 @@ async function fetchPrice() {
     return taoGbp;
   } catch(e) {
     console.error('Price fetch failed', e);
+    return null;
+  }
+}
+
+async function fetchApy(netuid, hotkey) {
+  try {
+    const r = await fetch(`/api/yield?netuid=${netuid}`);
+    const d = await r.json();
+    const data = d.data || d;
+    if (!Array.isArray(data) || data.length === 0) return null;
+    const validator = data.find(v => v.hotkey?.ss58 === hotkey || v.hotkey === hotkey);
+    if (!validator) return null;
+    const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
+    return apy !== null ? parseFloat(apy) * 100 : null;
+  } catch(e) {
     return null;
   }
 }
@@ -581,6 +598,7 @@ async function loadData() {
 
     // Fetch vtrust for all subnets in parallel
     const vtrusts = await Promise.all(CONFIG.SUBNETS.map(s => fetchVtrust(s.id)));
+    const apys = await Promise.all(CONFIG.SUBNETS.map(s => fetchApy(s.id, s.hotkey)));
 
     // Build table
     const tbody = document.getElementById('portfolio-body');
@@ -616,6 +634,8 @@ async function loadData() {
               <span style="color:${vtColor(vt)};min-width:50px;text-align:right">${vtDisplay}</span>
             </div>
           </td>
+          <td style="color:var(--accent2)">${apys[i] !== null ? apys[i].toFixed(1) + '%' : '—'}</td>
+          <td style="color:var(--muted)">${apys[i] !== null ? ((apys[i]/100/365) * subnet.staked).toFixed(4) + ' τ' : '—'}</td>
           <td>${statusIcon(vt, drift)}</td>
         </tr>`;
     });
