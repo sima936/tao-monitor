@@ -526,6 +526,7 @@ async function fetchApy(netuid, hotkey) {
     if (!Array.isArray(data) || data.length === 0) return null;
     const validator = data.find(v => v.hotkey?.ss58 === hotkey || v.hotkey === hotkey);
     if (!validator) return null;
+    console.log("validator found:", JSON.stringify(validator));
     const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
     return apy !== null ? parseFloat(apy) * 100 : null;
   } catch(e) {
