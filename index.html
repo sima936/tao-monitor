@@ -524,7 +524,7 @@ async function fetchVtrust(netuid) {
     if (!Array.isArray(data) || data.length === 0) return null;
     const subnet = CONFIG.SUBNETS.find(s => s.id === netuid);
     if (!subnet) return null;
-    const validator = data.find(v => v.hotkey === subnet.hotkey);
+    const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
     if (!validator) return null;
     const vt = validator.validator_trust ?? validator.vtrust ?? null;
     return vt !== null ? parseFloat(vt) : null;
