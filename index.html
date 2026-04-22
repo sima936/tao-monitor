@@ -602,8 +602,11 @@ async function loadData() {
 
     // Fetch vtrust for all subnets in parallel
     const vtrusts = await Promise.all(CONFIG.SUBNETS.map(s => fetchVtrust(s.id)));
-    const yieldData = await fetchAllYields();
-    const apys = CONFIG.SUBNETS.map(s => yieldData[s.id] ?? null);
+    let apys = CONFIG.SUBNETS.map(() => null);
+    try {
+      const yieldData = await fetchAllYields();
+      apys = CONFIG.SUBNETS.map(s => yieldData[s.id] ?? null);
+    } catch(e) { console.warn("Yield fetch failed", e); }
 
     // Build table
     const tbody = document.getElementById('portfolio-body');
