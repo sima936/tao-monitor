@@ -452,8 +452,6 @@
         <th>Target</th>
         <th>Drift</th>
         <th>vTrust</th>
-        <th>7D APY</th>
-        <th>Daily (τ)</th>
         <th>Status</th>
       </tr>
     </thead>
@@ -518,25 +516,6 @@ async function fetchPrice() {
   }
 }
 
-async function fetchAllYields() {
-  const results = {};
-  await Promise.all(CONFIG.SUBNETS.map(async (subnet) => {
-    try {
-      const r = await fetch(`/api/yield?netuid=${subnet.id}`);
-      const d = await r.json();
-      const data = d.data || d;
-      if (!Array.isArray(data)) return;
-      const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
-      if (!validator) return;
-      const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
-      results[subnet.id] = apy !== null ? parseFloat(apy) * 100 : null;
-    } catch(e) {
-      results[subnet.id] = null;
-    }
-  }));
-  return results;
-}
-
 async function fetchVtrust(netuid) {
   try {
     const r = await fetch(`/api/vtrust?netuid=${netuid}`);
@@ -545,7 +524,7 @@ async function fetchVtrust(netuid) {
     if (!Array.isArray(data) || data.length === 0) return null;
     const subnet = CONFIG.SUBNETS.find(s => s.id === netuid);
     if (!subnet) return null;
-    const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
+    const validator = data.find(v => v.hotkey === subnet.hotkey);
     if (!validator) return null;
     const vt = validator.validator_trust ?? validator.vtrust ?? null;
     return vt !== null ? parseFloat(vt) : null;
@@ -602,11 +581,6 @@ async function loadData() {
 
     // Fetch vtrust for all subnets in parallel
     const vtrusts = await Promise.all(CONFIG.SUBNETS.map(s => fetchVtrust(s.id)));
-    let apys = CONFIG.SUBNETS.map(() => null);
-    try {
-      const yieldData = await fetchAllYields();
-      apys = CONFIG.SUBNETS.map(s => yieldData[s.id] ?? null);
-    } catch(e) { console.warn("Yield fetch failed", e); }
 
     // Build table
     const tbody = document.getElementById('portfolio-body');
@@ -642,8 +616,6 @@ async function loadData() {
               <span style="color:${vtColor(vt)};min-width:50px;text-align:right">${vtDisplay}</span>
             </div>
           </td>
-          <td style="color:var(--accent2)">${apys[i] !== null ? apys[i].toFixed(1) + '%' : '—'}</td>
-          <td style="color:var(--muted)">${apys[i] !== null ? ((apys[i]/100/365) * subnet.staked).toFixed(4) + ' τ' : '—'}</td>
           <td>${statusIcon(vt, drift)}</td>
         </tr>`;
     });
