@@ -134,7 +134,7 @@
 
   .summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
   }
@@ -426,6 +426,7 @@
 
   /* Mobile subnet cards */
   .mobile-cards { display: none; margin-bottom: 2rem; }
+  .mobile-cards.active { display: block; }
 
   .mobile-card {
     background: var(--surface);
@@ -872,6 +873,17 @@ function resetCountdown() {
     }
   }, 1000);
 }
+
+function applyMobileLayout() {
+  const isMobile = window.innerWidth <= 768;
+  document.querySelector('.portfolio-table').style.display = isMobile ? 'none' : '';
+  const mc = document.getElementById('mobile-cards');
+  if (isMobile) mc.classList.add('active');
+  else mc.classList.remove('active');
+}
+
+window.addEventListener('resize', applyMobileLayout);
+applyMobileLayout();
 
 loadData();
 </script>
