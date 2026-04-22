@@ -28,7 +28,7 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 if self.path == '/api/price':
                     return self.proxy_price()
                 if self.path.startswith('/api/vtrust'):
-                    return self.proxy_vtrust() 
+                    return self.proxy_vtrust()
                 if self.path.startswith('/api/yield'):
                     return self.proxy_yield()
                 return super().do_GET()
@@ -74,7 +74,8 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e)}).encode())
-def proxy_yield(self):
+
+    def proxy_yield(self):
         try:
             params = parse_qs(urlparse(self.path).query)
             netuid = params.get('netuid', ['0'])[0]
@@ -95,6 +96,7 @@ def proxy_yield(self):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e)}).encode())
+
     def send_auth_request(self):
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'Basic realm="TAO Monitor"')
@@ -103,7 +105,7 @@ def proxy_yield(self):
         self.wfile.write(b'Unauthorized')
 
     def log_message(self, format, *args):
-        pass  # Suppress noisy access logs
+        pass
 
 print(f"# v2Serving on port {PORT}")
 http.server.HTTPServer(('0.0.0.0', PORT), AuthHandler).serve_forever()
