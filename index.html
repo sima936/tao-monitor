@@ -384,10 +384,129 @@
     color: var(--dim);
   }
 
-  @media (max-width: 600px) {
-    .portfolio-table th:nth-child(4),
-    .portfolio-table td:nth-child(4) { display: none; }
-    .card-value { font-size: 1.3rem; }
+  @media (max-width: 768px) {
+    .container { padding: 0.75rem; }
+
+    header {
+      flex-direction: column;
+      align-items: flex-start;
+      margin-bottom: 1rem;
+      gap: 0.6rem;
+    }
+
+    .logo-area h1 { font-size: 1.4rem; }
+
+    .status-bar {
+      width: 100%;
+      justify-content: flex-start;
+      gap: 0.4rem;
+      flex-wrap: nowrap;
+    }
+
+    .status-pill { padding: 0.3rem 0.6rem; font-size: 0.65rem; }
+    .refresh-btn { padding: 0.3rem 0.6rem; font-size: 0.65rem; margin-left: auto; }
+
+    .card-value { font-size: 1.2rem; }
+
+    .summary-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+      gap: 0.6rem;
+    }
+
+    /* Hide table entirely on mobile, show cards instead */
+    .portfolio-table { display: none; }
+    .mobile-cards { display: block; }
+
+    .alloc-name { width: 80px; font-size: 0.62rem; }
+    .alloc-pct { width: 38px; font-size: 0.7rem; }
+    .alloc-target-pct { width: 42px; font-size: 0.6rem; }
+
+    footer { font-size: 0.55rem; }
+  }
+
+  /* Mobile subnet cards */
+  .mobile-cards { display: none; margin-bottom: 2rem; }
+
+  .mobile-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    transition: border-color 0.2s;
+  }
+
+  .mobile-card:hover { border-color: var(--accent); }
+
+  .mobile-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .mobile-card-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+  }
+
+  .mobile-stat {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+  }
+
+  .mobile-stat-label {
+    font-size: 0.58rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.2rem;
+  }
+
+  .mobile-stat-value {
+    font-size: 0.8rem;
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .mobile-vtrust-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .mobile-vtrust-label {
+    font-size: 0.6rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    flex-shrink: 0;
+  }
+
+  .mobile-vtrust-track {
+    flex: 1;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .mobile-vtrust-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+
+  .mobile-vtrust-value {
+    font-size: 0.75rem;
+    flex-shrink: 0;
+    min-width: 45px;
+    text-align: right;
   }
 </style>
 </head>
@@ -452,6 +571,8 @@
         <th>Target</th>
         <th>Drift</th>
         <th>vTrust</th>
+        <th>7D APY</th>
+        <th>Daily (τ)</th>
         <th>Status</th>
       </tr>
     </thead>
@@ -459,6 +580,9 @@
       <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:2rem">Loading positions...</td></tr>
     </tbody>
   </table>
+
+  <!-- Mobile Subnet Cards -->
+  <div class="mobile-cards" id="mobile-cards"></div>
 
   <!-- Allocation Chart -->
   <div class="section-title">Allocation vs Target</div>
@@ -516,6 +640,25 @@ async function fetchPrice() {
   }
 }
 
+async function fetchAllYields() {
+  const results = {};
+  await Promise.all(CONFIG.SUBNETS.map(async (subnet) => {
+    try {
+      const r = await fetch(`/api/yield?netuid=${subnet.id}`);
+      const d = await r.json();
+      const data = d.data || d;
+      if (!Array.isArray(data)) return;
+      const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
+      if (!validator) return;
+      const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
+      results[subnet.id] = apy !== null ? parseFloat(apy) * 100 : null;
+    } catch(e) {
+      results[subnet.id] = null;
+    }
+  }));
+  return results;
+}
+
 async function fetchVtrust(netuid) {
   try {
     const r = await fetch(`/api/vtrust?netuid=${netuid}`);
@@ -524,7 +667,7 @@ async function fetchVtrust(netuid) {
     if (!Array.isArray(data) || data.length === 0) return null;
     const subnet = CONFIG.SUBNETS.find(s => s.id === netuid);
     if (!subnet) return null;
-    const validator = data.find(v => v.hotkey === subnet.hotkey);
+    const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
     if (!validator) return null;
     const vt = validator.validator_trust ?? validator.vtrust ?? null;
     return vt !== null ? parseFloat(vt) : null;
@@ -581,6 +724,11 @@ async function loadData() {
 
     // Fetch vtrust for all subnets in parallel
     const vtrusts = await Promise.all(CONFIG.SUBNETS.map(s => fetchVtrust(s.id)));
+    let apys = CONFIG.SUBNETS.map(() => null);
+    try {
+      const yieldData = await fetchAllYields();
+      apys = CONFIG.SUBNETS.map(s => yieldData[s.id] ?? null);
+    } catch(e) { console.warn("Yield fetch failed", e); }
 
     // Build table
     const tbody = document.getElementById('portfolio-body');
@@ -616,8 +764,66 @@ async function loadData() {
               <span style="color:${vtColor(vt)};min-width:50px;text-align:right">${vtDisplay}</span>
             </div>
           </td>
+          <td style="color:var(--accent2)">${apys[i] !== null ? apys[i].toFixed(1) + '%' : '—'}</td>
+          <td style="color:var(--muted)">${apys[i] !== null ? ((apys[i]/100/365) * subnet.staked).toFixed(4) + ' τ' : '—'}</td>
           <td>${statusIcon(vt, drift)}</td>
         </tr>`;
+    });
+
+    // Build mobile cards
+    const mobileCards = document.getElementById('mobile-cards');
+    mobileCards.innerHTML = '';
+    CONFIG.SUBNETS.forEach((subnet, i) => {
+      const vt = vtrusts[i];
+      const actualPct = (subnet.staked / total) * 100;
+      const drift = actualPct - subnet.target;
+      const valueGbp = taoGbp ? subnet.staked * taoGbp : null;
+      const vtDisplay = vt !== null ? vt.toFixed(4) : 'N/A';
+      const vtBar = vt !== null ? Math.round(vt * 100) : 0;
+      const driftSign = drift >= 0 ? '+' : '';
+      mobileCards.innerHTML += `
+        <div class="mobile-card">
+          <div class="mobile-card-header">
+            <div>
+              <div class="subnet-name">${subnet.name}</div>
+              <div class="subnet-id">SN${subnet.id}</div>
+            </div>
+            ${statusIcon(vt, drift)}
+          </div>
+          <div class="mobile-card-grid">
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">Staked</div>
+              <div class="mobile-stat-value">${subnet.staked.toFixed(4)} τ</div>
+            </div>
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">Value</div>
+              <div class="mobile-stat-value">${valueGbp ? '£' + valueGbp.toFixed(2) : '—'}</div>
+            </div>
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">Drift</div>
+              <div class="mobile-stat-value"><span class="drift-badge ${driftClass(drift)}">${driftSign}${drift.toFixed(1)}%</span></div>
+            </div>
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">Allocation</div>
+              <div class="mobile-stat-value">${actualPct.toFixed(1)}%</div>
+            </div>
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">7D APY</div>
+              <div class="mobile-stat-value" style="color:var(--accent2)">${apys[i] !== null ? apys[i].toFixed(1) + '%' : '—'}</div>
+            </div>
+            <div class="mobile-stat">
+              <div class="mobile-stat-label">Daily τ</div>
+              <div class="mobile-stat-value" style="color:var(--muted)">${apys[i] !== null ? ((apys[i]/100/365) * subnet.staked).toFixed(4) : '—'}</div>
+            </div>
+          </div>
+          <div class="mobile-vtrust-row">
+            <div class="mobile-vtrust-label">vTrust</div>
+            <div class="mobile-vtrust-track">
+              <div class="mobile-vtrust-fill" style="width:${vtBar}%;background:${vtColor(vt)}"></div>
+            </div>
+            <div class="mobile-vtrust-value" style="color:${vtColor(vt)}">${vtDisplay}</div>
+          </div>
+        </div>`;
     });
 
     // Build allocation chart
