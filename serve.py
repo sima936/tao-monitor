@@ -28,7 +28,9 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 if self.path == '/api/price':
                     return self.proxy_price()
                 if self.path.startswith('/api/vtrust'):
-                    return self.proxy_vtrust()
+                    return self.proxy_vtrust() 
+                if self.path.startswith('/api/yield'):
+                    return self.proxy_yield()
                 return super().do_GET()
         except:
             pass
@@ -72,7 +74,27 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e)}).encode())
-
+def proxy_yield(self):
+        try:
+            params = parse_qs(urlparse(self.path).query)
+            netuid = params.get('netuid', ['0'])[0]
+            url = f'https://api.taostats.io/api/dtao/validator/yield/latest/v1?netuid={netuid}&limit=200'
+            req = urllib.request.Request(url, headers={
+                'Authorization': TAOSTATS_KEY,
+                'User-Agent': 'TAO-Monitor/1.0'
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = r.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_response(502)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)}).encode())
     def send_auth_request(self):
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'Basic realm="TAO Monitor"')
