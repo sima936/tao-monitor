@@ -83,5 +83,5 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Suppress noisy access logs
 
-print(f"Serving on port {PORT}")
+print(f"# v2Serving on port {PORT}")
 http.server.HTTPServer(('0.0.0.0', PORT), AuthHandler).serve_forever()
