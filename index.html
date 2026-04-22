@@ -518,20 +518,23 @@ async function fetchPrice() {
   }
 }
 
-async function fetchApy(netuid, hotkey) {
-  try {
-    const r = await fetch(`/api/yield?netuid=${netuid}`);
-    const d = await r.json();
-    const data = d.data || d;
-    if (!Array.isArray(data) || data.length === 0) return null;
-    const validator = data.find(v => v.hotkey?.ss58 === hotkey || v.hotkey === hotkey);
-    if (!validator) return null;
-    console.log("validator found:", JSON.stringify(validator));
-    const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
-    return apy !== null ? parseFloat(apy) * 100 : null;
-  } catch(e) {
-    return null;
-  }
+async function fetchAllYields() {
+  const results = {};
+  await Promise.all(CONFIG.SUBNETS.map(async (subnet) => {
+    try {
+      const r = await fetch(`/api/yield?netuid=${subnet.id}`);
+      const d = await r.json();
+      const data = d.data || d;
+      if (!Array.isArray(data)) return;
+      const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
+      if (!validator) return;
+      const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
+      results[subnet.id] = apy !== null ? parseFloat(apy) * 100 : null;
+    } catch(e) {
+      results[subnet.id] = null;
+    }
+  }));
+  return results;
 }
 
 async function fetchVtrust(netuid) {
@@ -599,7 +602,8 @@ async function loadData() {
 
     // Fetch vtrust for all subnets in parallel
     const vtrusts = await Promise.all(CONFIG.SUBNETS.map(s => fetchVtrust(s.id)));
-    const apys = await Promise.all(CONFIG.SUBNETS.map(s => fetchApy(s.id, s.hotkey)));
+    const yieldData = await fetchAllYields();
+    const apys = CONFIG.SUBNETS.map(s => yieldData[s.id] ?? null);
 
     // Build table
     const tbody = document.getElementById('portfolio-body');
