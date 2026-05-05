@@ -31,13 +31,30 @@ def send_telegram(message, parse_mode="HTML"):
         return False
 
 def get_tao_price():
+    # Source 1: CoinGecko (3 attempts)
+    for attempt in range(3):
+        try:
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "bittensor", "vs_currencies": "usd"}, timeout=10)
+            price = r.json()["bittensor"]["usd"]
+            print(f"[Price] CoinGecko: ${price:.2f}")
+            return price
+        except Exception as e:
+            print(f"[Price] CoinGecko attempt {attempt+1} failed: {e}")
+            time.sleep(2)
+
+    # Source 2: KuCoin public API (no account needed)
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bittensor", "vs_currencies": "usd"}, timeout=10)
-        return r.json()["bittensor"]["usd"]
+        r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
+            params={"symbol": "TAO-USDT"}, timeout=10)
+        price = float(r.json()["data"]["price"])
+        print(f"[Price] KuCoin fallback: ${price:.2f}")
+        return price
     except Exception as e:
-        print(f"[Price error] {e}")
-        return None
+        print(f"[Price] KuCoin fallback failed: {e}")
+
+    print("[Price] All sources failed, returning None")
+    return None
 
 def load_state():
     if os.path.exists(STATE_FILE):
