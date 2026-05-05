@@ -63,7 +63,7 @@ def run_daily_summary():
         + "\n".join(f"{s['subnet']:<14} {s['staked']:>8.4f} TAO" for s in STAKES)
         + f"\n{'─'*26}\n{'TOTAL':<14} {total:>8.4f} TAO</pre>\n"
         f"💵 Value: <b>{usd}</b>\n"
-        f"💰 TAO price: <b>${price:.2f}</b>\n\n"
+        f"💰 TAO price: <b>${f'{price:.2f}' if price else 'N/A'}</b>\n\n"
         f"🔗 <a href='https://taostats.io/account/{COLDKEY}'>View on TaoStats</a>"
     )
     send_telegram(msg)
