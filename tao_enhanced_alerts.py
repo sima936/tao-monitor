@@ -9,15 +9,18 @@ PRICE_DROP_THRESHOLD = 0.10
 VTRUST_MIN = 0.80
 STATE_FILE = "/home/simar/tao_state.json"
 
-STAKES = [
-    {"subnet": "SN0 Root",    "netuid": 0,  "validator": "TAO.com",        "hotkey": "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi", "staked": 5.94},
-    {"subnet": "SN64 Chutes", "netuid": 64, "validator": "Chutes Primary", "hotkey": "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ", "staked": 1.96},
-    {"subnet": "SN62 Ridges", "netuid": 62, "validator": "General Tensor", "hotkey": "5Djyacas3eWLPhCKsS3neNSJonzfxJmD3gcrMTFDc4eHsn62", "staked": 1.24},
-    {"subnet": "SN4 Targon",  "netuid": 4,  "validator": "5Hp18g...",      "hotkey": "5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM", "staked": 1.04},
-    {"subnet": "SN75 Hippius","netuid": 75, "validator": "5G1Qj9...",      "hotkey": "5G1Qj93Fy22grpiGKq6BEvqqmS2HVRs3jaEdMhq9absQzs6g", "staked": 0.79},
-    {"subnet": "SN68 Nova",   "netuid": 68, "validator": "5F1tQr...",      "hotkey": "5F1tQr8K2VfBr2pG5MpAQf62n5xSAsjuCZheQUy82csaPavg", "staked": 0.58},
-    {"subnet": "SN51 Lium",   "netuid": 51, "validator": "tao.bot",        "hotkey": "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u", "staked": 0.35},
-]
+SNAPSHOT_FILE = "/tmp/tao_latest.json"
+
+def load_stakes():
+    """Load live stake positions from tao_monitor snapshot."""
+    if os.path.exists(SNAPSHOT_FILE):
+        with open(SNAPSHOT_FILE) as f:
+            data = json.load(f)
+        data = data["positions"]
+        return [{"subnet": f"SN{s['netuid']} {s['name']}", "netuid": s["netuid"],
+                 "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in data]
+    return []
+
 
 def send_telegram(message, parse_mode="HTML"):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -69,10 +72,12 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def run_daily_summary():
+    STAKES = load_stakes()
     state = load_state()
     price = get_tao_price()
     total = sum(s["staked"] for s in STAKES)
-    usd = f"${total * price:,.2f}" if price else "N/A"
+    total_gbp = sum(s["value_gbp"] for s in STAKES)
+    usd = f"£{total_gbp:,.2f}" if STAKES else "N/A"
     msg = (
         f"📊 <b>DAILY PORTFOLIO SUMMARY</b>\n"
         f"📅 {datetime.now().strftime('%A, %d %b %Y')}\n\n"
