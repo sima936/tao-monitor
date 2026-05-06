@@ -30,7 +30,7 @@ VTRUST_WARN_THRESHOLD = 0.1  # flag anything below this
 # Alpha token GBP values are approximations based on bonding curve pricing,
 # not precise mark-to-market figures.
 SUBNET_VALIDATORS = {
-    0:  ("Root → TAO.com", "root",  "5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes", 0.500),
+    0:  ("Root → Kraken",  "root",  "5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes", 0.500),
     64: ("Chutes",          "alpha", "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ", 0.165),
     62: ("Ridges",          "alpha", "5Djyacas3eWLPhCKsS3neNSJonzfxJmD3gcrMTFDc4eHsn62", 0.110),
     4:  ("Targon",          "alpha", "5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM", 0.095),
@@ -93,6 +93,8 @@ def fetch_tao_price():
 
 async def fetch_vtrust(sub, netuid: int, hotkey: str) -> float | None:
     """Fetch vtrust for our hotkey on a given subnet via metagraph."""
+    if netuid == 0:
+        return None  # Root vtrust not meaningful via metagraph — monitored by tao_vtrust_monitor.py
     try:
         mg = await sub.metagraph(netuid)
         if hotkey in mg.hotkeys:
