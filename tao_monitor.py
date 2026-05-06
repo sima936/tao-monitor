@@ -25,6 +25,8 @@ COINGECKO_KEY   = os.getenv("COINGECKO_API_KEY", "none")
 LOG_DIR = Path(__file__).parent
 LOG_FILE = LOG_DIR / "tao_monitor.log"
 
+VTRUST_WARN_THRESHOLD = 0.1  # flag anything below this
+
 # Alpha token GBP values are approximations based on bonding curve pricing,
 # not precise mark-to-market figures.
 SUBNET_VALIDATORS = {
@@ -34,7 +36,7 @@ SUBNET_VALIDATORS = {
     4:  ("Targon",          "alpha", "5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM", 0.095),
     75: ("Hippius",         "alpha", "5G1Qj93Fy22grpiGKq6BEvqqmS2HVRs3jaEdMhq9absQzs6g", 0.070),
     68: ("Nova",            "alpha", "5F1tQr8K2VfBr2pG5MpAQf62n5xSAsjuCZheQUy82csaPavg", 0.035),
-    51: ("Lium",               "alpha", "5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u", 0.035),
+    51: ("Lium",            "alpha", "5D7aRtpmVBKsQRzMA2ioUPL25onJPzBjiFVVt5uP1uEsWxui", 0.035),
     55: ("Ko/Precog",       "alpha", "5CzSYnS88EpVv7Kve7U1VCYKjCbtKpxZNHMacAy3BkfCsn55", 0.025),
 }
 
@@ -89,8 +91,21 @@ def fetch_tao_price():
         return None, None
 
 
+async def fetch_vtrust(sub, netuid: int, hotkey: str) -> float | None:
+    """Fetch vtrust for our hotkey on a given subnet via metagraph."""
+    try:
+        mg = await sub.metagraph(netuid)
+        if hotkey in mg.hotkeys:
+            uid = mg.hotkeys.index(hotkey)
+            return float(mg.validator_trust[uid])
+        return None
+    except Exception as e:
+        logging.warning(f"Could not fetch vtrust for SN{netuid}: {e}")
+        return None
+
+
 async def fetch_positions(sub):
-    """Fetch stake amounts for all positions."""
+    """Fetch stake amounts and vtrust for all positions."""
     positions = {}
     for netuid, (name, stake_type, hotkey, pct) in SUBNET_VALIDATORS.items():
         try:
@@ -113,12 +128,16 @@ async def fetch_positions(sub):
                 except Exception as e:
                     logging.warning(f"Could not get subnet price for SN{netuid}: {e}")
 
+            # Fetch vtrust for this hotkey on this subnet
+            vtrust = await fetch_vtrust(sub, netuid, hotkey)
+
             positions[netuid] = {
                 "name": name,
                 "stake_type": stake_type,
                 "hotkey": hotkey,
                 "tao_amount": tao_amount,
                 "subnet_price_tao": subnet_price_tao,
+                "vtrust": vtrust,
             }
         except Exception as e:
             logging.error(f"Failed to fetch position for SN{netuid} {name}: {e}")
@@ -134,7 +153,6 @@ def calculate_values(positions, tao_gbp, tao_usd):
         if pos["stake_type"] == "root":
             value_gbp = pos["tao_amount"] * tao_gbp
         else:
-            # Alpha token GBP ≈ alpha_tokens × subnet_price_tao × tao_gbp (bonding curve approximation)
             value_gbp = pos["tao_amount"] * pos["subnet_price_tao"] * tao_gbp
         total_gbp += value_gbp
         results.append({
@@ -143,6 +161,7 @@ def calculate_values(positions, tao_gbp, tao_usd):
             "tao_amount": pos["tao_amount"],
             "subnet_price_tao": pos["subnet_price_tao"],
             "value_gbp": value_gbp,
+            "vtrust": pos.get("vtrust"),
         })
     return results, total_gbp
 
@@ -152,13 +171,26 @@ def log_positions(results, total_gbp, tao_gbp, tao_usd):
     logging.info(f"TAO Monitor — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logging.info(f"TAO Price: £{tao_gbp:.2f} GBP / ${tao_usd:.2f} USD")
     logging.info("-" * 60)
+    warnings = []
     for r in results:
+        vtrust = r.get("vtrust")
+        if vtrust is not None:
+            vtrust_str = f"vtrust={vtrust:.4f}"
+            if vtrust < VTRUST_WARN_THRESHOLD:
+                vtrust_str += " ⚠️"
+                warnings.append(f"SN{r['netuid']} {r['name']}: vtrust={vtrust:.4f}")
+        else:
+            vtrust_str = "vtrust=N/A"
         logging.info(
             f"SN{r['netuid']:<4} {r['name']:<20} "
-            f"{r['tao_amount']:.4f} TAO  →  £{r['value_gbp']:.2f}"
+            f"{r['tao_amount']:.4f}  →  £{r['value_gbp']:.2f}  {vtrust_str}"
         )
     logging.info("-" * 60)
     logging.info(f"Total portfolio value: £{total_gbp:.2f} GBP")
+    if warnings:
+        logging.warning("⚠️  LOW VTRUST ALERTS:")
+        for w in warnings:
+            logging.warning(f"   {w}")
     logging.info("=" * 60)
 
 
