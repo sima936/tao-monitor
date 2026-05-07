@@ -1,2 +1,3 @@
 bittensor
 requests
+python-dotenv
