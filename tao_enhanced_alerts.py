@@ -7,7 +7,7 @@ CHAT_ID   = "8290777331"
 COLDKEY   = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
 PRICE_DROP_THRESHOLD = 0.10
 VTRUST_MIN = 0.80
-STATE_FILE = "/home/simar/tao_state.json"
+STATE_FILE = "/tmp/tao_state.json"
 
 SNAPSHOT_FILE = "/tmp/tao_latest.json"
 
