@@ -16,10 +16,45 @@ def load_stakes():
     if os.path.exists(SNAPSHOT_FILE):
         with open(SNAPSHOT_FILE) as f:
             data = json.load(f)
-        data = data["positions"]
+        positions = data["positions"]
         return [{"subnet": f"SN{s['netuid']} {s['name']}", "netuid": s["netuid"],
-                 "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in data]
-    return []
+                 "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in positions]
+    try:
+        import bittensor as bt, re
+        sub = bt.subtensor(network="finney")
+        stakes = sub.get_stake_info_for_coldkey(coldkey_ss58=COLDKEY)
+        price_usd = get_tao_price() or 0
+        r = requests.get("https://api.frankfurter.app/latest?from=USD&to=GBP", timeout=5)
+        gbp_rate = r.json()["rates"]["GBP"] if r.ok else 0.78
+        positions = []
+        seen = set()
+        for info in stakes:
+            uid = info.netuid
+            if uid in seen: continue
+            seen.add(uid)
+            try:
+                alpha = float(re.sub(r"[^\d.]", "", str(info.stake).split()[0]))
+            except:
+                alpha = 0.0
+            if alpha < 0.0001: continue
+            if uid == 0:
+                value_gbp = alpha * price_usd * gbp_rate
+                name = "Root/Kraken"
+            else:
+                try:
+                    meta = sub.metagraph(uid)
+                    ap = float(getattr(meta, "alpha_price", 0) or 0)
+                    value_gbp = alpha * ap * price_usd * gbp_rate
+                    name = getattr(meta, "name", f"SN{uid}")
+                except:
+                    value_gbp = 0.0
+                    name = f"SN{uid}"
+            positions.append({"subnet": f"SN{uid} {name}", "netuid": uid,
+                               "staked": alpha, "value_gbp": value_gbp})
+        return sorted(positions, key=lambda x: x["value_gbp"], reverse=True)
+    except Exception as e:
+        print(f"load_stakes error: {e}")
+        return []
 
 
 def send_telegram(message, parse_mode="HTML"):
