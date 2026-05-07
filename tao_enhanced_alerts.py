@@ -21,7 +21,7 @@ def load_stakes():
                  "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in positions]
     try:
         import bittensor as bt, re
-        sub = bt.subtensor(network="finney")
+        sub = bt.Subtensor(network="finney")
         stakes = sub.get_stake_info_for_coldkey(coldkey_ss58=COLDKEY)
         price_usd = get_tao_price() or 0
         r = requests.get("https://api.frankfurter.app/latest?from=USD&to=GBP", timeout=5)
