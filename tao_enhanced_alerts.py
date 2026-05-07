@@ -12,48 +12,18 @@ STATE_FILE = "/tmp/tao_state.json"
 SNAPSHOT_FILE = "/tmp/tao_latest.json"
 
 def load_stakes():
-    """Fetch stake positions directly via taostats API - no local deps."""
-    VALIDATORS = {
-        0:  ("Root/Kraken", "5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes"),
-        64: ("Chutes",      "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ"),
-        62: ("Ridges",      "5Djyacas3eWLPhCKsS3neNSJonzfxJmD3gcrMTFDc4eHsn62"),
-        4:  ("Targon",      "5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM"),
-        75: ("Hippius",     "5G1Qj93Fy22grpiGKq6BEvqqmS2HVRs3jaEdMhq9absQzs6g"),
-        68: ("Nova",        "5F1tQr8K2VfBr2pG5MpAQf62n5xSAsjuCZheQUy82csaPavg"),
-        51: ("Lium",        "5D7aRtpmVBKsQRzMA2ioUPL25onJPzBjiFVVt5uPZ3TDsn51"),
-        55: ("Ko/Precog",   "5CzSYnS88EpVv7Kve7U1VCYKjCbtKpxZNHMacAy3BkfCsn55"),
-    }
-    try:
-        price_usd = get_tao_price() or 0
-        r = requests.get("https://api.frankfurter.app/latest?from=USD&to=GBP", timeout=5)
-        gbp_rate = r.json()["rates"]["GBP"] if r.ok else 0.78
-        positions = []
-        for netuid, (name, hotkey) in VALIDATORS.items():
-            try:
-                url = f"https://taostats.io/api/stake/v1?hotkey={hotkey}&coldkey={COLDKEY}&netuid={netuid}"
-                resp = requests.get(url, timeout=10, headers={"accept": "application/json"})
-                if not resp.ok:
-                    continue
-                data = resp.json()
-                records = data.get("data", [])
-                if not records:
-                    continue
-                alpha = float(records[0].get("stake", 0))
-                if alpha < 0.0001:
-                    continue
-                if netuid == 0:
-                    value_gbp = alpha * price_usd * gbp_rate
-                else:
-                    tao_equiv = float(records[0].get("stake_tao", alpha * 0.01))
-                    value_gbp = tao_equiv * price_usd * gbp_rate
-                positions.append({"subnet": f"SN{netuid} {name}", "netuid": netuid,
-                                   "staked": alpha, "value_gbp": value_gbp})
-            except Exception as e:
-                print(f"SN{netuid} fetch error: {e}")
-        return sorted(positions, key=lambda x: x["value_gbp"], reverse=True)
-    except Exception as e:
-        print(f"load_stakes error: {e}")
-        return []
+    """Load stake positions from tao_monitor snapshot."""
+    import os, json
+    if os.path.exists(SNAPSHOT_FILE):
+        try:
+            with open(SNAPSHOT_FILE) as f:
+                data = json.load(f)
+            positions = data.get("positions", [])
+            return [{"subnet": f"SN{s['netuid']} {s['name']}", "netuid": s["netuid"],
+                     "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in positions]
+        except Exception as e:
+            print(f"Snapshot read error: {e}")
+    return []
 def send_telegram(message, parse_mode="HTML"):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": parse_mode}
