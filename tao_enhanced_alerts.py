@@ -20,7 +20,7 @@ def load_stakes():
                 data = json.load(f)
             positions = data.get("positions", [])
             return [{"subnet": f"SN{s['netuid']} {s['name']}", "netuid": s["netuid"],
-                     "staked": s["tao_amount"], "value_gbp": s["value_gbp"]} for s in positions]
+                     "staked": round(s["tao_amount"] * s.get("subnet_price_tao", 1.0), 4), "value_gbp": s["value_gbp"]} for s in positions]
         except Exception as e:
             print(f"Snapshot read error: {e}")
     return []
