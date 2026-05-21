@@ -25,8 +25,12 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             if user == USERNAME and pwd == PASSWORD:
                 if self.path == '/' or self.path == '':
                     self.path = '/index.html'
+                if self.path == '/gordie' or self.path == '/gordie.html':
+                    self.path = '/gordie.html'
                 if self.path == '/api/price':
                     return self.proxy_price()
+                if self.path.startswith('/api/gordie/pools'):
+                    return self.proxy_gordie_pools()
                 if self.path.startswith('/api/vtrust'):
                     return self.proxy_vtrust()
                 if self.path.startswith('/api/yield'):
@@ -86,6 +90,26 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 'User-Agent': 'TAO-Monitor/1.0'
             })
             with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_response(502)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+    def proxy_gordie_pools(self):
+        try:
+            url = 'https://api.taostats.io/api/dtao/pool/latest/v1?limit=256'
+            req = urllib.request.Request(url, headers={
+                'Authorization': TAOSTATS_KEY,
+                'User-Agent': 'TAO-Gordie/1.0'
+            })
+            with urllib.request.urlopen(req, timeout=45) as r:
                 data = r.read()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
