@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GORDIE — Subnet Scanner</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #080c10;
+  --surface: #0d1117;
+  --surface2: #131920;
+  --border: #1e2d3d;
+  --accent: #f0b90b;
+  --accent2: #00ff88;
+  --warn: #ffb800;
+  --danger: #ff4444;
+  --text: #e6edf3;
+  --muted: #7d8590;
+  --dim: #3d4450;
+  --green: #00ff88;
+  --red: #ff4444;
+  --cyan: #00d4ff;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(240,185,11,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(240,185,11,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem;
+  position: relative;
+  z-index: 1;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 2rem;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.logo-area h1 {
+  font-family: 'Syne', sans-serif;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--accent), #ff6b00);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.logo-area p {
+  color: var(--muted);
+  font-size: 0.7rem;
+  margin-top: 0.25rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.dot.warn { background: var(--warn); }
+.dot.danger { background: var(--danger); }
+
+.btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.3rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.7rem;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+
+.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.7rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.nav-link:hover { color: var(--accent); }
+
+/* Summary cards */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.card-label {
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.3rem;
+}
+
+.card-value {
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+.card-sub {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
+
+.gold { color: var(--accent); }
+.green { color: var(--green); }
+.red { color: var(--red); }
+.cyan { color: var(--cyan); }
+
+/* Section headers */
+.section-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 1.5rem 0 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-title .badge {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.65rem;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+th {
+  text-align: left;
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+th:hover { color: var(--accent); }
+th.sorted { color: var(--accent); }
+th.sorted::after { content: ' ▼'; font-size: 0.55rem; }
+th.sorted.asc::after { content: ' ▲'; }
+
+td {
+  padding: 0.5rem 0.5rem;
+  border-bottom: 1px solid rgba(30,45,61,0.5);
+  white-space: nowrap;
+}
+
+tr:hover { background: rgba(240,185,11,0.03); }
+
+.alert-row { background: rgba(255,68,68,0.06); }
+.alert-row:hover { background: rgba(255,68,68,0.1); }
+
+.pass-row { background: rgba(0,255,136,0.04); }
+.pass-row:hover { background: rgba(0,255,136,0.08); }
+
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 500;
+}
+
+.tag-pass { background: rgba(0,255,136,0.15); color: var(--green); }
+.tag-fail { background: rgba(255,68,68,0.15); color: var(--red); }
+.tag-hold { background: rgba(0,212,255,0.15); color: var(--cyan); }
+.tag-watch { background: rgba(240,185,11,0.15); color: var(--accent); }
+.tag-blacklist { background: rgba(128,128,128,0.15); color: var(--muted); }
+
+.score-bar {
+  display: inline-block;
+  width: 40px;
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  overflow: hidden;
+  vertical-align: middle;
+  margin-right: 0.3rem;
+}
+
+.score-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.pct-positive { color: var(--green); }
+.pct-negative { color: var(--red); }
+.pct-neutral { color: var(--muted); }
+
+/* Filter breakdown */
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.filter-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.7rem;
+}
+
+.filter-name { color: var(--muted); }
+.filter-count { font-weight: 600; }
+
+/* Loading */
+.loading {
+  text-align: center;
+  padding: 3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+footer {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.65rem;
+  color: var(--dim);
+  text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .container { padding: 1rem; }
+  .summary-grid { grid-template-columns: repeat(2, 1fr); }
+  table { font-size: 0.65rem; }
+  td, th { padding: 0.4rem 0.3rem; }
+  .logo-area h1 { font-size: 1.5rem; }
+  .hide-mobile { display: none; }
+}
+
+/* Tab system */
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 0.5rem 1rem;
+  font-size: 0.7rem;
+  font-family: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo-area">
+      <h1>GORDIE</h1>
+      <p>Subnet Scanner · Flow Momentum · Phase 1</p>
+    </div>
+    <div class="controls">
+      <a href="/index.html" class="nav-link">← Portfolio</a>
+      <div class="status-pill">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">Loading...</span>
+      </div>
+      <button class="btn" onclick="loadData()">↻ Scan</button>
+    </div>
+  </header>
+
+  <!-- Summary Cards -->
+  <div class="summary-grid">
+    <div class="card">
+      <div class="card-label">TAO Price</div>
+      <div class="card-value gold" id="tao-price">—</div>
+      <div class="card-sub" id="tao-price-gbp">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Subnets Scanned</div>
+      <div class="card-value" id="total-scanned">—</div>
+      <div class="card-sub" id="blacklisted-count">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Passed Filters</div>
+      <div class="card-value green" id="total-passed">—</div>
+      <div class="card-sub" id="pass-rate">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Holdings Alerts</div>
+      <div class="card-value" id="alert-count">—</div>
+      <div class="card-sub" id="alert-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Fear & Greed</div>
+      <div class="card-value" id="fear-greed">—</div>
+      <div class="card-sub" id="fear-greed-label">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Last Scan</div>
+      <div class="card-value" style="font-size:0.9rem;padding-top:0.2rem" id="last-scan">—</div>
+      <div class="card-sub" id="scan-time">—</div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="holdings">Holdings</button>
+    <button class="tab" data-tab="opportunities">Opportunities</button>
+    <button class="tab" data-tab="all-subnets">All Subnets</button>
+    <button class="tab" data-tab="filters">Filter Breakdown</button>
+  </div>
+
+  <!-- Holdings Tab -->
+  <div class="tab-content active" id="tab-holdings">
+    <div class="section-title">Current Holdings <span class="badge" id="holdings-badge">7 positions</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Subnet</th>
+          <th>Price (τ)</th>
+          <th>1H%</th>
+          <th>24H%</th>
+          <th>7D%</th>
+          <th>30D%</th>
+          <th>Pool (τ)</th>
+          <th>Filter</th>
+          <th>Score</th>
+        </tr>
+      </thead>
+      <tbody id="holdings-body">
+        <tr><td colspan="9" class="loading"><span class="spinner"></span>Scanning subnets...</td></tr>
+      </tbody>
+    </table>
+
+    <div class="section-title" style="margin-top:1.5rem">Watchlist <span class="badge" id="watchlist-badge">DSV Conviction</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Subnet</th>
+          <th>Price (τ)</th>
+          <th>24H%</th>
+          <th>7D%</th>
+          <th>30D%</th>
+          <th>Pool (τ)</th>
+          <th>Filter</th>
+          <th>Score</th>
+        </tr>
+      </thead>
+      <tbody id="watchlist-body">
+        <tr><td colspan="8" class="loading"><span class="spinner"></span>Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Opportunities Tab -->
+  <div class="tab-content" id="tab-opportunities">
+    <div class="section-title">Top Scoring Subnets <span class="badge" id="opp-badge">—</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="netuid">SN</th>
+          <th data-sort="name">Name</th>
+          <th data-sort="score">Score</th>
+          <th data-sort="price">Price (τ)</th>
+          <th data-sort="pct_day">24H%</th>
+          <th data-sort="pct_week">7D%</th>
+          <th data-sort="pct_month">30D%</th>
+          <th data-sort="pool_depth">Pool (τ)</th>
+          <th class="hide-mobile">Fear/Greed</th>
+        </tr>
+      </thead>
+      <tbody id="opportunities-body">
+        <tr><td colspan="9" class="loading"><span class="spinner"></span>Scanning...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- All Subnets Tab -->
+  <div class="tab-content" id="tab-all-subnets">
+    <div class="section-title">All Subnets <span class="badge" id="all-badge">—</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="netuid">SN</th>
+          <th data-sort="name">Name</th>
+          <th data-sort="price">Price (τ)</th>
+          <th data-sort="pct_day">24H%</th>
+          <th data-sort="pct_week">7D%</th>
+          <th data-sort="pct_month">30D%</th>
+          <th data-sort="pool_depth">Pool (τ)</th>
+          <th>Status</th>
+          <th data-sort="reason">Reason</th>
+        </tr>
+      </thead>
+      <tbody id="all-subnets-body">
+        <tr><td colspan="9" class="loading"><span class="spinner"></span>Scanning...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Filters Tab -->
+  <div class="tab-content" id="tab-filters">
+    <div class="section-title">Pre-Filter Thresholds</div>
+    <div class="filter-grid" id="filter-thresholds"></div>
+    <div class="section-title">Rejection Breakdown <span class="badge" id="rejection-badge">—</span></div>
+    <div class="filter-grid" id="filter-breakdown"></div>
+  </div>
+
+  <footer>
+    GORDIE · sima936 · Inspired by The Gordon (DSV Fund) · Data: TaoStats & CoinGecko
+  </footer>
+
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const HOLDINGS = {
+  0:  {name: 'Root (Kraken)', hotkey: '5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes'},
+  4:  {name: 'Targon'},
+  51: {name: 'Lium'},
+  62: {name: 'Ridges'},
+  64: {name: 'Chutes'},
+  68: {name: 'Nova'},
+  75: {name: 'Hippius'},
+};
+
+const WATCHLIST = {
+  3:'Templar', 2:'D-Sperse', 13:'Data Universe', 18:'Zeus',
+  32:'ItsAI', 33:'Ready AI', 34:'Bitmind', 44:'Score',
+  46:'RESI', 50:'Synth', 56:'Gradients', 85:'Vidaio',
+  93:'Bitcast', 21:'AdTao'
+};
+
+const BLACKLIST = new Set([17, 29, 43, 53, 89, 104, 112, 115]);
+
+const FILTERS = {
+  price_cap: 0.04,
+  price_floor: 0.0,
+  min_pool_depth: 15000,
+  max_pool_depth: 150000,
+  gini_cap: 0.85,
+  monthly_pump_cap: 500,
+  accel_sell_day: -5,
+  accel_sell_week: -5,
+  flat_month_floor: 3,
+  flat_week_floor: 3,
+  structural_decline: -10,
+  day_crash: -20,
+};
+
+const TAOSTATS_KEY = 'tao-07fa8ae2-9d1d-4d70-8e91-7bb056604211:be6002dd';
+
+// ── State ───────────────────────────────────────────────────────────────────
+let allSubnets = [];
+let sortCol = 'score';
+let sortAsc = false;
+
+// ── Tabs ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Data Fetching ───────────────────────────────────────────────────────────
+async function fetchPools() {
+  const r = await fetch('/api/gordie/pools');
+  if (!r.ok) throw new Error('Pool fetch failed');
+  return r.json();
+}
+
+async function fetchPrice() {
+  const r = await fetch('/api/price');
+  if (!r.ok) throw new Error('Price fetch failed');
+  return r.json();
+}
+
+// ── Pre-Filters (mirrors tao_gordie.py) ─────────────────────────────────────
+function sf(v) { const f = parseFloat(v); return isNaN(f) ? null : f; }
+
+function applyPrefilters(netuid, pool) {
+  const price = sf(pool.price);
+  let totalTaoRaw = sf(pool.total_tao);
+  let totalTao = totalTaoRaw && totalTaoRaw > 1e6 ? totalTaoRaw / 1e9 : totalTaoRaw;
+  const pctDay = sf(pool.price_change_1_day);
+  const pctWeek = sf(pool.price_change_1_week);
+  const pctMonth = sf(pool.price_change_1_month);
+  const pctHour = sf(pool.price_change_1_hour);
+  let mcRaw = sf(pool.market_cap);
+  let mc = mcRaw && mcRaw > 1e6 ? mcRaw / 1e9 : mcRaw;
+  let volRaw = sf(pool.tao_volume_24_hr);
+  let vol = volRaw && volRaw > 1e6 ? volRaw / 1e9 : volRaw;
+  const fg = sf(pool.fear_and_greed_index);
+  const name = pool.name || 'SN' + netuid;
+
+  const metrics = { netuid, name, price, pool_depth: totalTao, pct_hour: pctHour,
+    pct_day: pctDay, pct_week: pctWeek, pct_month: pctMonth,
+    market_cap: mc, volume_24h: vol, fear_greed: fg };
+
+  if (BLACKLIST.has(netuid)) return { passed: false, reason: 'BLACKLISTED', metrics };
+  if (netuid === 0) return { passed: false, reason: 'ROOT_SUBNET', metrics };
+  if (price === null || price <= 0) return { passed: false, reason: 'PRICE_FLOOR', metrics };
+  if (price > FILTERS.price_cap) return { passed: false, reason: 'PRICE_CAP', metrics };
+  if (totalTao !== null && totalTao < FILTERS.min_pool_depth) return { passed: false, reason: 'MIN_POOL', metrics };
+  if (totalTao !== null && totalTao > FILTERS.max_pool_depth) return { passed: false, reason: 'MAX_POOL', metrics };
+  if (pctMonth !== null && pctMonth > FILTERS.monthly_pump_cap) return { passed: false, reason: 'MONTHLY_PUMP', metrics };
+  if (pctMonth === 0 && pctWeek === 0 && pctDay === 0) return { passed: false, reason: 'ALL_ZERO', metrics };
+  if (pctDay !== null && pctWeek !== null && pctDay < FILTERS.accel_sell_day && pctWeek < FILTERS.accel_sell_week)
+    return { passed: false, reason: 'ACCEL_SELL', metrics };
+  if (pctMonth !== null && pctWeek !== null && pctMonth < FILTERS.flat_month_floor && pctWeek < FILTERS.flat_week_floor)
+    return { passed: false, reason: 'FLAT_MOMENTUM', metrics };
+  if (pctMonth !== null && pctWeek !== null && pctMonth < 0 && pctWeek < 0)
+    return { passed: false, reason: 'DUAL_DOWNTREND', metrics };
+  if (pctMonth !== null && pctMonth < FILTERS.structural_decline)
+    return { passed: false, reason: 'STRUCTURAL_DECLINE', metrics };
+  if (pctDay !== null && pctDay < FILTERS.day_crash)
+    return { passed: false, reason: 'DAY_CRASH', metrics };
+
+  return { passed: true, reason: 'PASS', metrics };
+}
+
+function scoreSubnet(m) {
+  let score = 0, max = 0;
+  const {pct_day: d, pct_week: w, pct_month: mo, pool_depth: pool, volume_24h: vol, market_cap: mc} = m;
+
+  // Trend (30%)
+  max += 30;
+  if (d != null && w != null && mo != null) {
+    const raw = Math.max(-50,Math.min(50,d))*0.3 + Math.max(-50,Math.min(50,w))*0.4 + Math.max(-50,Math.min(50,mo))*0.3;
+    score += 0.3 * Math.max(0, Math.min(100, 50 + raw));
+  }
+
+  // Pool sweet spot (10%)
+  max += 10;
+  if (pool != null) {
+    const mid = (FILTERS.min_pool_depth + FILTERS.max_pool_depth) / 2;
+    const dist = Math.abs(pool - mid) / (FILTERS.max_pool_depth - FILTERS.min_pool_depth);
+    score += 0.1 * Math.max(0, (1 - dist*2)) * 100;
+  }
+
+  // Day momentum (25%)
+  max += 25;
+  if (d != null) score += 0.25 * Math.max(0, Math.min(100, 50 + d*5));
+
+  // Week momentum (20%)
+  max += 20;
+  if (w != null) score += 0.2 * Math.max(0, Math.min(100, 50 + w*2.5));
+
+  // Gini neutral (15%)
+  max += 15;
+  score += 0.15 * 50;
+
+  return max > 0 ? Math.round((score / max) * 1000) / 10 : 0;
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+function pctCell(v) {
+  if (v === null || v === undefined) return '<span class="pct-neutral">—</span>';
+  const cls = v > 0 ? 'pct-positive' : v < 0 ? 'pct-negative' : 'pct-neutral';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
+}
+
+function scoreCell(s) {
+  if (!s && s !== 0) return '—';
+  const pct = Math.min(s, 100);
+  const color = s >= 30 ? 'var(--green)' : s >= 20 ? 'var(--accent)' : 'var(--red)';
+  return `<span class="score-bar"><span class="score-fill" style="width:${pct}%;background:${color}"></span></span>${s}`;
+}
+
+function statusTag(passed, reason) {
+  if (passed) return '<span class="tag tag-pass">PASS</span>';
+  const cls = reason === 'BLACKLISTED' ? 'tag-blacklist' : 'tag-fail';
+  return `<span class="tag ${cls}">${reason}</span>`;
+}
+
+function renderHoldings(results) {
+  const tbody = document.getElementById('holdings-body');
+  const holdingNetuids = Object.keys(HOLDINGS).map(Number);
+  const rows = results.filter(r => holdingNetuids.includes(r.metrics.netuid));
+
+  let alertCount = 0;
+  let html = '';
+  rows.forEach(r => {
+    const m = r.metrics;
+    const isAlert = !r.passed && r.reason !== 'ROOT_SUBNET';
+    if (isAlert) alertCount++;
+    html += `<tr class="${isAlert ? 'alert-row' : ''}">
+      <td><strong>SN${m.netuid}</strong> ${m.name}</td>
+      <td>${m.price ? m.price.toFixed(4) : '—'}</td>
+      <td>${pctCell(m.pct_hour)}</td>
+      <td>${pctCell(m.pct_day)}</td>
+      <td>${pctCell(m.pct_week)}</td>
+      <td>${pctCell(m.pct_month)}</td>
+      <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
+      <td>${statusTag(r.passed, r.reason)}</td>
+      <td>${r.passed ? scoreCell(r.score) : '—'}</td>
+    </tr>`;
+  });
+
+  tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:1rem">No holding data</td></tr>';
+
+  document.getElementById('alert-count').textContent = alertCount;
+  document.getElementById('alert-count').className = 'card-value ' + (alertCount > 0 ? 'red' : 'green');
+  document.getElementById('alert-sub').textContent = alertCount > 0 ? alertCount + ' need attention' : 'All healthy';
+}
+
+function renderWatchlist(results) {
+  const tbody = document.getElementById('watchlist-body');
+  const watchNetuids = Object.keys(WATCHLIST).map(Number);
+  const rows = results.filter(r => watchNetuids.includes(r.metrics.netuid));
+
+  let html = '';
+  rows.sort((a, b) => (b.score || 0) - (a.score || 0));
+  rows.forEach(r => {
+    const m = r.metrics;
+    html += `<tr class="${r.passed ? 'pass-row' : ''}">
+      <td><span class="tag tag-watch">WATCH</span> <strong>SN${m.netuid}</strong> ${WATCHLIST[m.netuid] || m.name}</td>
+      <td>${m.price ? m.price.toFixed(4) : '—'}</td>
+      <td>${pctCell(m.pct_day)}</td>
+      <td>${pctCell(m.pct_week)}</td>
+      <td>${pctCell(m.pct_month)}</td>
+      <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
+      <td>${statusTag(r.passed, r.reason)}</td>
+      <td>${r.passed ? scoreCell(r.score) : '—'}</td>
+    </tr>`;
+  });
+
+  document.getElementById('watchlist-badge').textContent = rows.length + ' tracked';
+  tbody.innerHTML = html || '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:1rem">No watchlist data</td></tr>';
+}
+
+function renderOpportunities(results) {
+  const tbody = document.getElementById('opportunities-body');
+  const passing = results.filter(r => r.passed).sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  document.getElementById('opp-badge').textContent = passing.length + ' passing';
+
+  if (passing.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No subnets passing all filters — market in downtrend 📉</td></tr>';
+    return;
+  }
+
+  let html = '';
+  passing.forEach(r => {
+    const m = r.metrics;
+    html += `<tr class="pass-row">
+      <td>SN${m.netuid}</td>
+      <td><strong>${m.name}</strong></td>
+      <td>${scoreCell(r.score)}</td>
+      <td>${m.price ? m.price.toFixed(4) : '—'}</td>
+      <td>${pctCell(m.pct_day)}</td>
+      <td>${pctCell(m.pct_week)}</td>
+      <td>${pctCell(m.pct_month)}</td>
+      <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
+      <td class="hide-mobile">${m.fear_greed ? m.fear_greed.toFixed(0) : '—'}</td>
+    </tr>`;
+  });
+  tbody.innerHTML = html;
+}
+
+function renderAllSubnets(results) {
+  const tbody = document.getElementById('all-subnets-body');
+  const sorted = [...results].sort((a, b) => {
+    let va = a.metrics[sortCol] ?? -999;
+    let vb = b.metrics[sortCol] ?? -999;
+    if (sortCol === 'reason') { va = a.reason; vb = b.reason; }
+    if (sortCol === 'score') { va = a.score || 0; vb = b.score || 0; }
+    if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  let html = '';
+  sorted.forEach(r => {
+    const m = r.metrics;
+    const cls = r.passed ? 'pass-row' : (BLACKLIST.has(m.netuid) ? '' : '');
+    const holdTag = m.netuid in HOLDINGS ? '<span class="tag tag-hold">HOLD</span> ' : '';
+    const watchTag = m.netuid in WATCHLIST ? '<span class="tag tag-watch">W</span> ' : '';
+    html += `<tr class="${cls}">
+      <td>SN${m.netuid}</td>
+      <td>${holdTag}${watchTag}<strong>${m.name}</strong></td>
+      <td>${m.price ? m.price.toFixed(4) : '—'}</td>
+      <td>${pctCell(m.pct_day)}</td>
+      <td>${pctCell(m.pct_week)}</td>
+      <td>${pctCell(m.pct_month)}</td>
+      <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
+      <td>${statusTag(r.passed, r.reason)}</td>
+      <td style="font-size:0.6rem;color:var(--muted)">${r.passed ? '' : r.reason}</td>
+    </tr>`;
+  });
+
+  document.getElementById('all-badge').textContent = results.length + ' subnets';
+  tbody.innerHTML = html;
+}
+
+function renderFilterBreakdown(results) {
+  // Thresholds
+  const thresholdHtml = Object.entries(FILTERS).map(([k, v]) => {
+    const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `<div class="filter-item"><span class="filter-name">${label}</span><span class="filter-count">${typeof v === 'number' && v > 100 ? v.toLocaleString() + 'τ' : v}</span></div>`;
+  }).join('');
+  document.getElementById('filter-thresholds').innerHTML = thresholdHtml;
+
+  // Breakdown
+  const counts = {};
+  results.forEach(r => {
+    if (!r.passed) counts[r.reason] = (counts[r.reason] || 0) + 1;
+  });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const totalRejected = results.filter(r => !r.passed).length;
+
+  document.getElementById('rejection-badge').textContent = totalRejected + ' rejected';
+
+  const breakdownHtml = sorted.map(([reason, count]) => {
+    const pct = ((count / totalRejected) * 100).toFixed(0);
+    return `<div class="filter-item"><span class="filter-name">${reason}</span><span class="filter-count red">${count} <span style="color:var(--muted);font-weight:400">(${pct}%)</span></span></div>`;
+  }).join('');
+  document.getElementById('filter-breakdown').innerHTML = breakdownHtml;
+}
+
+// ── Main Load ───────────────────────────────────────────────────────────────
+async function loadData() {
+  const dot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  dot.className = 'dot warn';
+  statusText.textContent = 'Scanning...';
+
+  try {
+    const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice()]);
+
+    // Price
+    const usd = priceData.bittensor?.usd;
+    const gbp = priceData.bittensor?.gbp;
+    document.getElementById('tao-price').textContent = usd ? '$' + usd.toFixed(2) : '—';
+    document.getElementById('tao-price-gbp').textContent = gbp ? '£' + gbp.toFixed(2) : '—';
+
+    // Process all subnets
+    const pools = poolData.data || [];
+    const results = [];
+    let fgSum = 0, fgCount = 0;
+
+    pools.forEach(pool => {
+      const netuid = parseInt(pool.netuid);
+      if (isNaN(netuid)) return;
+      const { passed, reason, metrics } = applyPrefilters(netuid, pool);
+      const score = passed ? scoreSubnet(metrics) : null;
+      results.push({ passed, reason, metrics, score });
+
+      const fg = sf(pool.fear_and_greed_index);
+      if (fg) { fgSum += fg; fgCount++; }
+    });
+
+    // Summary cards
+    const passCount = results.filter(r => r.passed).length;
+    document.getElementById('total-scanned').textContent = results.length;
+    document.getElementById('blacklisted-count').textContent = BLACKLIST.size + ' blacklisted';
+    document.getElementById('total-passed').textContent = passCount;
+    document.getElementById('total-passed').className = 'card-value ' + (passCount > 0 ? 'green' : 'red');
+    document.getElementById('pass-rate').textContent = ((passCount / results.length) * 100).toFixed(1) + '% pass rate';
+
+    if (fgCount > 0) {
+      const avgFg = fgSum / fgCount;
+      document.getElementById('fear-greed').textContent = avgFg.toFixed(0);
+      const label = avgFg >= 75 ? 'Extreme Greed' : avgFg >= 55 ? 'Greed' : avgFg >= 45 ? 'Neutral' : avgFg >= 25 ? 'Fear' : 'Extreme Fear';
+      const fgColor = avgFg >= 55 ? 'green' : avgFg >= 45 ? 'gold' : 'red';
+      document.getElementById('fear-greed').className = 'card-value ' + fgColor;
+      document.getElementById('fear-greed-label').textContent = label;
+    }
+
+    const now = new Date();
+    document.getElementById('last-scan').textContent = now.toLocaleTimeString();
+    document.getElementById('scan-time').textContent = now.toLocaleDateString();
+
+    // Render all views
+    allSubnets = results;
+    renderHoldings(results);
+    renderWatchlist(results);
+    renderOpportunities(results);
+    renderAllSubnets(results);
+    renderFilterBreakdown(results);
+
+    dot.className = 'dot';
+    statusText.textContent = 'Live';
+
+  } catch (err) {
+    console.error(err);
+    dot.className = 'dot danger';
+    statusText.textContent = 'Error: ' + err.message;
+  }
+}
+
+// ── Column Sorting ──────────────────────────────────────────────────────────
+document.querySelectorAll('th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.sort;
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = false; }
+    document.querySelectorAll('th').forEach(h => h.classList.remove('sorted', 'asc'));
+    th.classList.add('sorted');
+    if (sortAsc) th.classList.add('asc');
+    renderAllSubnets(allSubnets);
+  });
+});
+
+// ── Auto refresh every 5 min ────────────────────────────────────────────────
+loadData();
+setInterval(loadData, 300000);
+</script>
+</body>
+</html>
