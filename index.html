@@ -601,14 +601,15 @@ const CONFIG = {
   REFRESH_INTERVAL: 60,
   AVG_BUY_GBP: 198.080364,
   SUBNETS: [
-    { id: 0,  name: 'SN0 Root',     staked: 5.94, target: 49.9, hotkey: '5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes' },
-    { id: 64, name: 'SN64 Chutes',  staked: 1.96, target: 16.5, hotkey: '5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ' },
-    { id: 62, name: 'SN62 Ridges',  staked: 1.24, target: 10.4, hotkey: '5Djyacas3eWLPhCKsS3neNSJonzfxJmD3gcrMTFDc4eHsn62' },
-    { id: 4,  name: 'SN4 Targon',   staked: 1.04, target: 8.7,  hotkey: '5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM' },
-    { id: 75, name: 'SN75 Hippius', staked: 0.79, target: 6.6,  hotkey: '5G1Qj93Fy22grpiGKq6BEvqqmS2HVRs3jaEdMhq9absQzs6g' },
-    { id: 68, name: 'SN68 Nova',    staked: 0.58, target: 4.9,  hotkey: '5F1tQr8K2VfBr2pG5MpAQf62n5xSAsjuCZheQUy82csaPavg' },
-    { id: 55, name: 'SN55 Ko/Precog', staked: 0.30, target: 2.5, hotkey: '5CzSYnS88EpVv7Kve7U1VCYKjCbtKpxZNHMacAy3BkfCsn55' },
-    { id: 51, name: 'SN51 Lium',    staked: 0.35, target: 3.0,  hotkey: '5E2LP6EnZ54m3wS8s1yPvD5c3xo71kQroBw7aUVK32TKeZ5u' },
+    { id: 9,   name: 'SN9 Iota',      staked: 5.60, target: 16.0 },
+    { id: 68,  name: 'SN68 NOVA',      staked: 4.32, target: 14.0 },
+    { id: 44,  name: 'SN44 Score',     staked: 4.20, target: 12.0 },
+    { id: 5,   name: 'SN5 Hone',       staked: 3.90, target: 11.0 },
+    { id: 55,  name: 'SN55 NIOME',     staked: 3.60, target: 11.0 },
+    { id: 4,   name: 'SN4 Targon',     staked: 2.86, target: 11.0 },
+    { id: 123, name: 'SN123 MANTIS',   staked: 3.20, target: 9.0 },
+    { id: 75,  name: 'SN75 Hippius',   staked: 2.41, target: 9.0 },
+    { id: 32,  name: 'SN32 ItsAI',     staked: 1.888, target: 7.0 },
   ],
   WARN_DRIFT: 3.0,
   ALERT_DRIFT: 5.0,
@@ -650,10 +651,15 @@ async function fetchAllYields() {
       const d = await r.json();
       const data = d.data || d;
       if (!Array.isArray(data)) return;
-      const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
-      if (!validator) return;
-      const apy = validator.seven_day_apy ?? validator.one_day_apy ?? null;
-      results[subnet.id] = apy !== null ? parseFloat(apy) * 100 : null;
+      let bestApy = null;
+      for (const v of data) {
+        const apy = v.seven_day_apy ?? v.one_day_apy ?? null;
+        if (apy !== null) {
+          const val = parseFloat(apy) * 100;
+          if (bestApy === null || val > bestApy) bestApy = val;
+        }
+      }
+      results[subnet.id] = bestApy;
     } catch(e) {
       results[subnet.id] = null;
     }
@@ -667,12 +673,12 @@ async function fetchVtrust(netuid) {
     const d = await r.json();
     const data = d.data || d;
     if (!Array.isArray(data) || data.length === 0) return null;
-    const subnet = CONFIG.SUBNETS.find(s => s.id === netuid);
-    if (!subnet) return null;
-    const validator = data.find(v => v.hotkey?.ss58 === subnet.hotkey || v.hotkey === subnet.hotkey);
-    if (!validator) return null;
-    const vt = validator.validator_trust ?? validator.vtrust ?? null;
-    return vt !== null ? parseFloat(vt) : null;
+    let vtSum = 0, vtCount = 0;
+    for (const v of data) {
+      const vt = v.validator_trust ?? v.vtrust ?? null;
+      if (vt !== null) { vtSum += parseFloat(vt); vtCount++; }
+    }
+    return vtCount > 0 ? vtSum / vtCount : null;
   } catch(e) {
     return null;
   }

@@ -67,13 +67,15 @@ MAX_NETUID = 140
 # Updated manually or via env. Format: {netuid: {"name": str, "hotkey": str}}
 
 CURRENT_HOLDINGS = {
-    0:  {"name": "Root (Kraken)", "hotkey": "5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes"},
-    4:  {"name": "Targon",        "hotkey": "5Hp18g9P8hLGKp9W3ZDr4bvJwba6b6bY3P2u3VdYf8yMR8FM"},
-    51: {"name": "Lium",          "hotkey": "5D7aRtpmVBKsQRzMA2ioUPL25onJPzBjiFVVt5uPZ3TDsn51"},
-    62: {"name": "Ridges",        "hotkey": "5Djyacas3eWLPhCKsS3neNSJonzfxJmD3gcrMTFDc4eHsn62"},
-    64: {"name": "Chutes",        "hotkey": "5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ"},
-    68: {"name": "Nova",          "hotkey": "5F1tQr8K2VfBr2pG5MpAQf62n5xSAsjuCZheQUy82csaPavg"},
-    75: {"name": "Hippius",       "hotkey": "5G1Qj93Fy22grpiGKq6BEvqqmS2HVRs3jaEdMhq9absQzs6g"},
+    4:   {"name": "Targon",   "hotkey": ""},
+    5:   {"name": "Hone",     "hotkey": ""},
+    9:   {"name": "Iota",     "hotkey": ""},
+    32:  {"name": "ItsAI",    "hotkey": ""},
+    44:  {"name": "Score",    "hotkey": ""},
+    55:  {"name": "NIOME",    "hotkey": ""},
+    68:  {"name": "NOVA",     "hotkey": ""},
+    75:  {"name": "Hippius",  "hotkey": ""},
+    123: {"name": "MANTIS",   "hotkey": ""},
 }
 
 WATCHLIST = {
@@ -81,10 +83,8 @@ WATCHLIST = {
     2:  {"name": "D-Sperse"},       # DSV conviction: SSL for AI
     13: {"name": "Data Universe"},  # DSV conviction: decentralised data scraper
     18: {"name": "Zeus"},           # DSV conviction: weather forecasting
-    32: {"name": "ItsAI"},          # DSV conviction: AI text detector
     33: {"name": "Ready AI"},       # DSV conviction: text data cleaning
     34: {"name": "Bitmind"},        # DSV conviction: deepfake detection
-    44: {"name": "Score"},          # DSV conviction: computer vision
     46: {"name": "RESI"},           # DSV conviction: real estate valuations
     50: {"name": "Synth"},          # DSV conviction: price forecasting
     56: {"name": "Gradients"},      # DSV conviction: Auto ML
@@ -104,9 +104,9 @@ BLACKLIST = {17, 29, 43, 53, 89, 104, 112, 115}
 # ─── Hard Pre-Filter Thresholds ──────────────────────────────────────────────
 
 FILTERS = {
-    "price_cap":           0.04,       # τ — above = overextended
+    "price_cap":          0.06,       # τ — above = overextended
     "price_floor":         0.0,        # τ — at or below = bad data
-    "min_pool_depth":      15000.0,    # τ — below = too thin, slippage risk
+    "min_pool_depth":    2000.0,    # τ — below = too thin, slippage risk
     "max_pool_depth":      150000.0,   # τ — above = mature, limited upside
     "gini_cap":            0.85,       # Gini coefficient — above = whale risk
     "monthly_pump_cap":    500.0,      # % — above = likely manipulation
@@ -114,7 +114,7 @@ FILTERS = {
     "accel_sell_week":     -5.0,       # %
     "flat_month_floor":    3.0,        # % — month AND week both below = flat
     "flat_week_floor":     3.0,        # %
-    "structural_decline":  -10.0,      # % month — sustained downtrend
+    "structural_decline": -25.0,      # % month — sustained downtrend
     "day_crash":           -20.0,      # % day — capitulation
 }
 
@@ -502,17 +502,17 @@ def apply_prefilters(netuid: int, pool: dict, subnet_info: dict = None) -> tuple
             and pct_week < FILTERS["accel_sell_week"]):
         return False, f"ACCEL_SELL (day={pct_day:.1f}%, week={pct_week:.1f}%)", metrics
     
-    # ── Filter 8: Flat momentum ──
-    if (pct_month is not None and pct_week is not None
-            and pct_month < FILTERS["flat_month_floor"]
-            and pct_week < FILTERS["flat_week_floor"]):
-        return False, f"FLAT_MOMENTUM (month={pct_month:.1f}%, week={pct_week:.1f}%)", metrics
+#    # ── Filter 8: Flat momentum ──
+#    if (pct_month is not None and pct_week is not None
+#            and pct_month < FILTERS["flat_month_floor"]
+#            and pct_week < FILTERS["flat_week_floor"]):
+#        return False, f"FLAT_MOMENTUM (month={pct_month:.1f}%, week={pct_week:.1f}%)", metrics
     
-    # ── Filter 9: Dual downtrend ──
-    if (pct_month is not None and pct_week is not None
-            and pct_month < 0 and pct_week < 0):
+#    # ── Filter 9: Dual downtrend ──
+#    if (pct_month is not None and pct_week is not None
+#            and pct_month < 0 and pct_week < 0):
         return False, f"DUAL_DOWNTREND (month={pct_month:.1f}%, week={pct_week:.1f}%)", metrics
-    
+#    
     # ── Filter 10: Structural decline ──
     if pct_month is not None and pct_month < FILTERS["structural_decline"]:
         return False, f"STRUCTURAL_DECLINE (month={pct_month:.1f}%)", metrics
@@ -527,11 +527,16 @@ def apply_prefilters(netuid: int, pool: dict, subnet_info: dict = None) -> tuple
         immunity = info.get("immunity_period") or info.get("immunity")
         is_active = info.get("is_active", True)
         # If subnet is explicitly marked as in immunity or not active, skip
-        if immunity and str(immunity).lower() not in ("0", "false", "none", "passed"):
-            return False, f"IMMUNITY_PERIOD", metrics
-        if not is_active:
-            return False, "INACTIVE", metrics
+#         if immunity and str(immunity).lower() not in ("0", "false", "none", "passed"):
+#             return False, f"IMMUNITY_PERIOD", metrics
+#         if not is_active:
+#             return False, "INACTIVE", metrics
     
+    # ── Filter 13: Zero emission ──
+        emission = sf(info.get("emission")) or sf(info.get("emission_value")) or sf(info.get("tempo_emission"))
+        if emission is not None and emission == 0:
+            return False, "ZERO_EMISSION", metrics
+
     # ── All filters passed ──
     return True, None, metrics
 
