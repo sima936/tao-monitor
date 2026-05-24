@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GORDIE — Subnet Scanner</title>
+<title>TAO Monitor — GORDIE</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -311,6 +311,16 @@ tr:hover { background: rgba(240,185,11,0.03); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.alloc-bar-row { display: flex; align-items: center; margin-bottom: 0.5rem; gap: 0.5rem; }
+.alloc-label { width: 110px; font-size: 0.7rem; color: var(--text); white-space: nowrap; }
+.alloc-track { flex: 1; height: 14px; background: var(--surface2); border-radius: 3px; position: relative; overflow: hidden; }
+.alloc-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+.alloc-target-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 2; }
+.alloc-pct { width: 45px; text-align: right; font-size: 0.7rem; font-weight: 500; }
+.drift-ok { color: var(--green); }
+.drift-warn { color: var(--warn); }
+.drift-danger { color: var(--red); }
+
 footer {
   margin-top: 2rem;
   padding-top: 1rem;
@@ -366,7 +376,7 @@ footer {
       <p>Subnet Scanner · Flow Momentum · Phase 1</p>
     </div>
     <div class="controls">
-      <a href="/index.html" class="nav-link">← Portfolio</a>
+      <a href="#" class="nav-link" style="opacity:0.3;pointer-events:none">TAO Monitor v3</a>
       <div class="status-pill">
         <div class="dot" id="status-dot"></div>
         <span id="status-text">Loading...</span>
@@ -411,14 +421,50 @@ footer {
 
   <!-- Tabs -->
   <div class="tabs">
-    <button class="tab active" data-tab="holdings">Holdings</button>
+    <button class="tab active" data-tab="portfolio">Portfolio</button>
+    <button class="tab" data-tab="holdings">Scanner</button>
     <button class="tab" data-tab="opportunities">Opportunities</button>
     <button class="tab" data-tab="all-subnets">All Subnets</button>
     <button class="tab" data-tab="filters">Filter Breakdown</button>
   </div>
 
   <!-- Holdings Tab -->
-  <div class="tab-content active" id="tab-holdings">
+  <!-- Portfolio Tab -->
+  <div class="tab-content active" id="tab-portfolio">
+    <div class="cards" style="margin-bottom:1.5rem">
+      <div class="card">
+        <div class="card-label">Total Staked</div>
+        <div class="card-value gold" id="port-total-tao">—</div>
+        <div class="card-sub" id="port-total-gbp">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Positions</div>
+        <div class="card-value green" id="port-count">—</div>
+        <div class="card-sub">active subnets</div>
+      </div>
+    </div>
+    <div class="section-title">Staked Positions <span class="badge" id="port-badge">loading...</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Subnet</th>
+          <th>Staked (τ)</th>
+          <th>Value (£)</th>
+          <th>Allocation</th>
+          <th>Target</th>
+          <th>Drift</th>
+        </tr>
+      </thead>
+      <tbody id="portfolio-body">
+        <tr><td colspan="6" class="loading"><span class="spinner"></span>Fetching from chain...</td></tr>
+      </tbody>
+    </table>
+    <div class="section-title" style="margin-top:1.5rem">Allocation Chart</div>
+    <div id="alloc-chart" style="padding:0.5rem 0"></div>
+  </div>
+
+  <!-- Scanner Tab (was Holdings) -->
+  <div class="tab-content" id="tab-holdings">
     <div class="section-title">Current Holdings <span class="badge" id="holdings-badge">7 positions</span></div>
     <table>
       <thead>
@@ -514,7 +560,7 @@ footer {
   </div>
 
   <footer>
-    GORDIE · sima936 · Inspired by The Gordon (DSV Fund) · Data: TaoStats & CoinGecko
+    GORDIE · TAO Monitor · sima936 · Inspired by The Gordon (DSV Fund) · Data: TaoStats & CoinGecko
   </footer>
 
 </div>
@@ -522,18 +568,20 @@ footer {
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
 const HOLDINGS = {
-  0:  {name: 'Root (Kraken)', hotkey: '5Ckaoft1B1CQ9zBV2FLVju4KPuMQzJVn7QUf3JeTvTq1uUes'},
-  4:  {name: 'Targon'},
-  51: {name: 'Lium'},
-  62: {name: 'Ridges'},
-  64: {name: 'Chutes'},
-  68: {name: 'Nova'},
-  75: {name: 'Hippius'},
+  4:   {name: 'Targon'},
+  5:   {name: 'Hone'},
+  9:   {name: 'Iota'},
+  32:  {name: 'ItsAI'},
+  44:  {name: 'Score'},
+  55:  {name: 'NIOME'},
+  68:  {name: 'NOVA'},
+  75:  {name: 'Hippius'},
+  123: {name: 'MANTIS'},
 };
 
 const WATCHLIST = {
   3:'Templar', 2:'D-Sperse', 13:'Data Universe', 18:'Zeus',
-  32:'ItsAI', 33:'Ready AI', 34:'Bitmind', 44:'Score',
+  33:'Ready AI', 34:'Bitmind',
   46:'RESI', 50:'Synth', 56:'Gradients', 85:'Vidaio',
   93:'Bitcast', 21:'AdTao'
 };
@@ -556,6 +604,11 @@ const FILTERS = {
 };
 
 const TAOSTATS_KEY = 'tao-07fa8ae2-9d1d-4d70-8e91-7bb056604211:be6002dd';
+
+// Portfolio target allocations (% of total)
+const TARGETS = {
+  9: 16, 68: 14, 44: 12, 5: 11, 55: 11, 4: 11, 123: 9, 75: 9, 32: 7
+};
 
 // ── State ───────────────────────────────────────────────────────────────────
 let allSubnets = [];
@@ -827,6 +880,80 @@ function renderFilterBreakdown(results) {
   document.getElementById('filter-breakdown').innerHTML = breakdownHtml;
 }
 
+// ── Portfolio Data ──────────────────────────────────────────────────────────
+async function fetchPortfolioStakes() {
+  const r = await fetch('/api/portfolio/stakes');
+  if (!r.ok) throw new Error('Portfolio fetch failed');
+  return r.json();
+}
+
+function renderPortfolio(stakeData, priceData) {
+  const tbody = document.getElementById('portfolio-body');
+  const gbp = priceData.bittensor?.gbp || 0;
+  const positions = (stakeData.data || [])
+    .filter(s => {
+      const tao = parseInt(s.balance_as_tao || '0') / 1e9;
+      return tao > 0.001;
+    })
+    .map(s => ({
+      netuid: parseInt(s.netuid),
+      name: s.hotkey_name || `SN${s.netuid}`,
+      tao: parseInt(s.balance_as_tao || '0') / 1e9,
+    }))
+    .sort((a, b) => b.tao - a.tao);
+
+  const totalTao = positions.reduce((sum, p) => sum + p.tao, 0);
+  const totalGbp = totalTao * gbp;
+
+  document.getElementById('port-total-tao').textContent = totalTao.toFixed(2) + 'τ';
+  document.getElementById('port-total-gbp').textContent = '£' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
+  document.getElementById('port-count').textContent = positions.length;
+  document.getElementById('port-badge').textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
+
+  const colors = ['#f0b90b','#00ff88','#00d4ff','#ff6b00','#a855f7','#f43f5e','#14b8a6','#eab308','#6366f1'];
+
+  let html = '';
+  let allocHtml = '';
+  positions.forEach((p, i) => {
+    const valGbp = p.tao * gbp;
+    const actualPct = totalTao > 0 ? (p.tao / totalTao) * 100 : 0;
+    const targetPct = TARGETS[p.netuid] || 0;
+    const drift = actualPct - targetPct;
+    const driftCls = Math.abs(drift) < 2 ? 'drift-ok' : Math.abs(drift) < 5 ? 'drift-warn' : 'drift-danger';
+    const driftStr = drift >= 0 ? '+' + drift.toFixed(1) + '%' : drift.toFixed(1) + '%';
+    const color = colors[i % colors.length];
+
+    html += `<tr>
+      <td><strong>SN${p.netuid}</strong> ${p.name}</td>
+      <td>${p.tao.toFixed(4)}</td>
+      <td>£${valGbp.toFixed(2)}</td>
+      <td>${actualPct.toFixed(1)}%</td>
+      <td>${targetPct > 0 ? targetPct + '%' : '—'}</td>
+      <td class="${driftCls}">${targetPct > 0 ? driftStr : '—'}</td>
+    </tr>`;
+
+    allocHtml += `<div class="alloc-bar-row">
+      <div class="alloc-label">SN${p.netuid} ${p.name}</div>
+      <div class="alloc-track">
+        <div class="alloc-fill" style="width:${Math.min(actualPct * 2.5, 100)}%;background:${color}"></div>
+        ${targetPct > 0 ? `<div class="alloc-target-line" style="left:${Math.min(targetPct * 2.5, 100)}%"></div>` : ''}
+      </div>
+      <div class="alloc-pct">${actualPct.toFixed(1)}%</div>
+    </div>`;
+  });
+
+  // Total row
+  html += `<tr style="border-top:1px solid var(--border);font-weight:600">
+    <td>TOTAL</td>
+    <td>${totalTao.toFixed(4)}</td>
+    <td>£${totalGbp.toFixed(2)}</td>
+    <td>100%</td><td></td><td></td>
+  </tr>`;
+
+  tbody.innerHTML = html || '<tr><td colspan="6" style="color:var(--muted);text-align:center">No positions found</td></tr>';
+  document.getElementById('alloc-chart').innerHTML = allocHtml;
+}
+
 // ── Main Load ───────────────────────────────────────────────────────────────
 async function loadData() {
   const dot = document.getElementById('status-dot');
@@ -836,6 +963,15 @@ async function loadData() {
 
   try {
     const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice()]);
+
+    // Portfolio — fetch in parallel, don't block scanner if it fails
+    fetchPortfolioStakes().then(stakeData => {
+      renderPortfolio(stakeData, priceData);
+    }).catch(err => {
+      console.warn('Portfolio fetch failed:', err);
+      document.getElementById('portfolio-body').innerHTML =
+        '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:1rem">Portfolio data unavailable</td></tr>';
+    });
 
     // Price
     const usd = priceData.bittensor?.usd;
