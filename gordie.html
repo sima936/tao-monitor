@@ -11,7 +11,7 @@
   --surface: #0d1117;
   --surface2: #131920;
   --border: #1e2d3d;
-  --accent: #f0b90b;
+  --accent: #00d4ff;
   --accent2: #00ff88;
   --warn: #ffb800;
   --danger: #ff4444;
@@ -67,7 +67,7 @@ header {
   font-size: 2rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, var(--accent), #ff6b00);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -243,7 +243,7 @@ tr:hover { background: rgba(240,185,11,0.03); }
 .tag-pass { background: rgba(0,255,136,0.15); color: var(--green); }
 .tag-fail { background: rgba(255,68,68,0.15); color: var(--red); }
 .tag-hold { background: rgba(0,212,255,0.15); color: var(--cyan); }
-.tag-watch { background: rgba(240,185,11,0.15); color: var(--accent); }
+.tag-watch { background: rgba(0,212,255,0.15); color: var(--accent); }
 .tag-blacklist { background: rgba(128,128,128,0.15); color: var(--muted); }
 
 .score-bar {
@@ -910,7 +910,7 @@ function renderPortfolio(stakeData, priceData) {
   document.getElementById('port-count').textContent = positions.length;
   document.getElementById('port-badge').textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
 
-  const colors = ['#f0b90b','#00ff88','#00d4ff','#ff6b00','#a855f7','#f43f5e','#14b8a6','#eab308','#6366f1'];
+  const colors = ['#00d4ff','#00ff88','#00d4ff','var(--accent2)','#a855f7','#f43f5e','#14b8a6','#eab308','#6366f1'];
 
   let html = '';
   let allocHtml = '';
