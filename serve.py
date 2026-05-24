@@ -23,14 +23,16 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             credentials = base64.b64decode(auth.split(' ')[1]).decode()
             user, pwd = credentials.split(':', 1)
             if user == USERNAME and pwd == PASSWORD:
-                if self.path == '/' or self.path == '':
-                    self.path = '/index.html'
-                if self.path == '/gordie' or self.path == '/gordie.html':
+                if self.path == '/' or self.path == '' or self.path == '/gordie' or self.path == '/gordie.html':
                     self.path = '/gordie.html'
+                if self.path == '/legacy' or self.path == '/index.html':
+                    self.path = '/index.html'
                 if self.path == '/api/price':
                     return self.proxy_price()
                 if self.path.startswith('/api/gordie/pools'):
                     return self.proxy_gordie_pools()
+                if self.path.startswith('/api/portfolio/stakes'):
+                    return self.proxy_portfolio_stakes()
                 if self.path.startswith('/api/vtrust'):
                     return self.proxy_vtrust()
                 if self.path.startswith('/api/yield'):
@@ -44,6 +46,27 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         try:
             url = 'https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd,gbp'
             req = urllib.request.Request(url, headers={'User-Agent': 'TAO-Monitor/1.0'})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_response(502)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+    def proxy_portfolio_stakes(self):
+        try:
+            coldkey = '5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR'
+            url = f'https://api.taostats.io/api/dtao/stake_balance/latest/v1?coldkey={coldkey}&limit=100'
+            req = urllib.request.Request(url, headers={
+                'Authorization': TAOSTATS_KEY,
+                'User-Agent': 'TAO-Monitor/1.0'
+            })
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
             self.send_response(200)
@@ -132,5 +155,5 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-print(f"# v2Serving on port {PORT}")
+print(f"# v3 Serving on port {PORT}")
 http.server.HTTPServer(('0.0.0.0', PORT), AuthHandler).serve_forever()
