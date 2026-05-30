@@ -50,9 +50,9 @@ SUBNET_MIN_TRAIN = 60      # ~2 months minimum history (vs 252 for stocks)
 # Raised here to accommodate established conviction holds (SN0, SN4, SN51 etc.)
 # which naturally have higher prices and deeper pools.
 # TODO Phase 2: split into two profiles — conviction holds vs active rotation.
-MAX_TOKEN_PRICE = 0.15     # TAO — raised from 0.04 to include established subnets
+MAX_TOKEN_PRICE = 1.0      # TAO — no upper price limit for established subnets
 MIN_POOL_DEPTH = 5.0       # TAO — below this, too illiquid
-MAX_POOL_DEPTH = 50000.0   # TAO — raised from 5000 to include mature subnets
+MAX_POOL_DEPTH = 500000.0  # TAO — raised to include all established subnets
 MAX_GENIE_SCORE = 0.85     # concentration — above this, manipulation risk
 
 # Scoring weights (sum to 1.0)
