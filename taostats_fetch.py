@@ -276,8 +276,11 @@ def pool_to_metrics(
 
     # Price history from seven_day_prices
     seven_day = pool.get("seven_day_prices", [])
+    logger.info(f"SN{netuid} seven_day raw type={type(seven_day).__name__} len={len(seven_day) if isinstance(seven_day, list) else 'N/A'} sample={str(seven_day)[:200]}")
     price_history = []
     timestamps = []
+    
+    
 
     if isinstance(seven_day, list):
         for entry in seven_day:
