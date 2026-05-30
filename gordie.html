@@ -315,7 +315,7 @@ tr:hover { background: rgba(240,185,11,0.03); }
 .alloc-label { width: 110px; font-size: 0.7rem; color: var(--text); white-space: nowrap; }
 .alloc-track { flex: 1; height: 14px; background: var(--surface2); border-radius: 3px; position: relative; overflow: hidden; }
 .alloc-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
-.alloc-target-line { position: absolute; top: -5px; bottom: 0; width: 2px; background: repeating-linear-gradient(to bottom, #fff 0px, #fff 3px, transparent 3px, transparent 6px); z-index: 2; }
+.alloc-target-line { position: absolute; top: 0; bottom: 0; width: 3px; background: #ff6b00; z-index: 2; box-shadow: 0 0 4px #ff6b00; }
 .alloc-target-line::before { content: '▼'; position: absolute; top: -1px; left: 50%; transform: translateX(-50%); font-size: 7px; color: #fff; line-height: 1; }
 .alloc-pct { width: 45px; text-align: right; font-size: 0.7rem; font-weight: 500; }
 .drift-ok { color: var(--green); }
