@@ -1,10 +1,2 @@
 [build]
 builder = "nixpacks"
-
-[deploy]
-startCommand = "python3 serve.py"
-
-[[crons]]
-name = "subnet-scorer"
-schedule = "*/30 * * * *"
-command = "python3 run_scoring.py"
