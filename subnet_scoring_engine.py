@@ -226,7 +226,7 @@ def apply_pre_filters(
 ) -> FilterResult:
     """Apply Siam's 4 hard pre-filters. Fail on ANY gate."""
 
-    if len(metrics.price_history) < SUBNET_WINDOW + 2:
+    if len(metrics.price_history) < 3:  # hard minimum, independent of window
         return FilterResult.FAIL_NO_DATA
     if metrics.token_price >= max_price:
         return FilterResult.FAIL_PRICE
