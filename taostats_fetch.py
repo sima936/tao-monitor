@@ -110,6 +110,25 @@ class TaostatsClient:
             logger.error(f"Request failed for {url}: {e}")
             raise
 
+    def get_all_subnet_info(self) -> dict:
+        """Fetch subnet info for ALL subnets in one call.
+
+        Returns a dict of {netuid: name} for filling in unknown subnet names.
+        """
+        try:
+            data = self.get(SUBNET_INFO)
+            result = {}
+            for subnet in data.get("data", []):
+                netuid = int(subnet.get("netuid", -1))
+                name = subnet.get("name") or subnet.get("subnet_name") or ""
+                if netuid >= 0 and name:
+                    result[netuid] = name
+            logger.info(f"Fetched names for {len(result)} subnets")
+            return result
+        except Exception as e:
+            logger.warning(f"Subnet info fetch failed: {e} — names will fall back to SN{{netuid}}")
+            return {}
+
     def get_all_pools(self) -> list[dict]:
         """Fetch pool data for ALL subnets in one call."""
         data = self.get(POOL_LATEST)
@@ -362,10 +381,16 @@ def fetch_all_subnet_metrics(
     pools = client.get_all_pools()
     logger.info(f"Got {len(pools)} subnet pools")
 
+    # Fetch subnet name registry (1 API call, fills in Unknown names)
+    subnet_names = client.get_all_subnet_info()
+
     # First pass: convert pools to metrics with default genie
     metrics_map: dict[int, SubnetMetrics] = {}
     for pool in pools:
         m = pool_to_metrics(pool, genie_score=0.5)
+        # Fill in name from registry if pool returned empty
+        if (not m.name or m.name == f"SN{m.subnet_id}") and m.subnet_id in subnet_names:
+            m.name = subnet_names[m.subnet_id]
         metrics_map[m.subnet_id] = m
 
     # Second pass: fetch metagraph for holdings every other run
