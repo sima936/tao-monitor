@@ -1,3 +1,5 @@
 bittensor
 requests
 python-dotenv
+numpy
+pandas
