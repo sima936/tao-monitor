@@ -46,9 +46,9 @@ SUBNET_THRESHOLD = 0.10    # ±10% regime boundary (vs ±5% for stocks)
 SUBNET_MIN_TRAIN = 60      # ~2 months minimum history (vs 252 for stocks)
 
 # Siam's hard pre-filter thresholds
-MAX_TOKEN_PRICE = 0.04     # TAO — above this, limited upside
+MAX_TOKEN_PRICE = 0.08     # TAO — above this, limited upside
 MIN_POOL_DEPTH = 5.0       # TAO — below this, too illiquid
-MAX_POOL_DEPTH = 5000.0    # TAO — above this, limited upside (TBD, needs tuning)
+MAX_POOL_DEPTH = 200000.0    # TAO — above this, limited upside (TBD, needs tuning)
 MAX_GENIE_SCORE = 0.85     # concentration — above this, manipulation risk
 
 # Scoring weights (sum to 1.0)
