@@ -45,14 +45,10 @@ SUBNET_WINDOW = 7          # 7-day rolling return (vs 20 for stocks)
 SUBNET_THRESHOLD = 0.10    # ±10% regime boundary (vs ±5% for stocks)
 SUBNET_MIN_TRAIN = 60      # ~2 months minimum history (vs 252 for stocks)
 
-# Filter thresholds
-# Note: Siam's original MAX_TOKEN_PRICE=0.04 targets small unknown subnets.
-# Raised here to accommodate established conviction holds (SN0, SN4, SN51 etc.)
-# which naturally have higher prices and deeper pools.
-# TODO Phase 2: split into two profiles — conviction holds vs active rotation.
-MAX_TOKEN_PRICE = 1.0      # TAO — no upper price limit for established subnets
+# Siam's hard pre-filter thresholds
+MAX_TOKEN_PRICE = 0.04     # TAO — above this, limited upside
 MIN_POOL_DEPTH = 5.0       # TAO — below this, too illiquid
-MAX_POOL_DEPTH = 500000.0  # TAO — raised to include all established subnets
+MAX_POOL_DEPTH = 5000.0    # TAO — above this, limited upside (TBD, needs tuning)
 MAX_GENIE_SCORE = 0.85     # concentration — above this, manipulation risk
 
 # Scoring weights (sum to 1.0)
@@ -179,8 +175,11 @@ def subnet_markov_analyze(
     if len(price_history) < window + 2:
         return None
 
-    idx = pd.to_datetime(timestamps)
-    close = pd.Series(price_history, index=idx, dtype=float).dropna()
+    if timestamps:
+        idx = pd.to_datetime(timestamps)
+        close = pd.Series(price_history, index=idx, dtype=float).dropna()
+    else:
+        close = pd.Series(price_history, dtype=float).dropna()
 
     if len(close) < window + 2:
         return None
@@ -230,7 +229,7 @@ def apply_pre_filters(
 ) -> FilterResult:
     """Apply Siam's 4 hard pre-filters. Fail on ANY gate."""
 
-    if len(metrics.price_history) < 3:  # hard minimum, independent of window
+    if len(metrics.price_history) < SUBNET_WINDOW + 2:
         return FilterResult.FAIL_NO_DATA
     if metrics.token_price >= max_price:
         return FilterResult.FAIL_PRICE
