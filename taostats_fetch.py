@@ -315,6 +315,28 @@ def pool_to_metrics(
 # Full fetch pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _synthetic_history(
+    current_price: float,
+    pct_change_1d: float,
+    pct_change_1w: float,
+) -> list[float]:
+    """Build a 9-bar synthetic price history from pct-change anchors.
+
+    Interpolates linearly between price 7 days ago, 1 day ago, and now.
+    Returns oldest-first. Used when both pool/latest and pool/history
+    fail to provide enough bars.
+    """
+    if current_price <= 0:
+        return []
+    price_1d = current_price / (1 + pct_change_1d / 100) if pct_change_1d else current_price
+    price_7d = current_price / (1 + pct_change_1w / 100) if pct_change_1w else current_price
+    # 7 evenly-spaced points from 7d→1d, then midpoint and now (9 total)
+    segment = [price_7d + (price_1d - price_7d) * i / 6 for i in range(7)]
+    segment.append((price_1d + current_price) / 2)
+    segment.append(current_price)
+    return [round(p, 8) for p in segment]
+
+
 def fetch_all_subnet_metrics(
     client: TaostatsClient,
     fetch_concentration: bool = True,
@@ -323,7 +345,9 @@ def fetch_all_subnet_metrics(
     """Fetch metrics for all subnets and return SubnetMetrics list.
 
     Step 1: Single API call to get all pool data
-    Step 2: Optionally fetch metagraph for concentration scoring
+    Step 2: Build synthetic price history for subnets with <9 bars
+            (seven_day_prices no longer returned by pool/latest)
+    Step 3: Optionally fetch metagraph for concentration scoring
             (expensive — 1 call per subnet, rate limited)
 
     If fetch_concentration is True but concentration_netuids is None,
@@ -341,11 +365,32 @@ def fetch_all_subnet_metrics(
 
     # First pass: convert pools to metrics with default genie
     metrics_map: dict[int, SubnetMetrics] = {}
+    raw_pools: dict[int, dict] = {}
     for pool in pools:
         m = pool_to_metrics(pool, genie_score=0.5)  # placeholder
         metrics_map[m.subnet_id] = m
+        raw_pools[m.subnet_id] = pool
 
-    # Second pass: fetch concentration for relevant subnets
+    # Second pass: seven_day_prices no longer returned by pool/latest —
+    # build synthetic history for every subnet missing >=9 bars.
+    # Real history storage can be added later; for now synthetic is universal.
+    thin = [nid for nid, m in metrics_map.items() if len(m.price_history) < 9]
+    if thin:
+        logger.info(f"Building synthetic history for {len(thin)} subnets with <9 bars...")
+    for netuid in thin:
+        pool = raw_pools[netuid]
+        synth = _synthetic_history(
+            metrics_map[netuid].token_price,
+            _safe_float(pool.get("price_change_1_day")),
+            _safe_float(pool.get("price_change_1_week")),
+        )
+        if synth:
+            metrics_map[netuid].price_history = synth
+            metrics_map[netuid].timestamps = []
+        else:
+            logger.warning(f"  SN{netuid}: price=0, cannot build synthetic history")
+
+    # Third pass: fetch concentration for relevant subnets
     if fetch_concentration:
         target_netuids = concentration_netuids
 
