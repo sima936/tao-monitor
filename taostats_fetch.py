@@ -205,7 +205,7 @@ def concentration_from_metagraph(metagraph_data: list[dict]) -> float:
             coldkey_addr = str(coldkey)
 
         # Stake might be in rao (divide by 1e9) or TAO — check the field
-        stake = neuron.get("stake", 0)
+        stake = neuron.get("alpha_stake") or neuron.get("stake", 0)
         if isinstance(stake, str):
             stake = float(stake)
 
