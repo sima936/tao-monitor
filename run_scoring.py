@@ -131,6 +131,7 @@ def run(
         all_metrics = fetch_all_subnet_metrics(
             client,
             fetch_concentration=fetch_concentration,
+            concentration_netuids=holdings,
         )
     except Exception as e:
         logger.error(f"Data fetch failed: {e}")
