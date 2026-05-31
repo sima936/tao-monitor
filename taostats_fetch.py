@@ -66,7 +66,7 @@ BASE_URL = "https://api.taostats.io"
 # Endpoints
 POOL_LATEST = "/api/dtao/pool/latest/v1"
 POOL_HISTORY = "/api/dtao/pool/history/v1"
-METAGRAPH_LATEST = "/api/dtao/metagraph/latest/v1"
+METAGRAPH_LATEST = "/api/metagraph/latest/v1"
 SUBNET_INFO = "/api/dtao/subnet/latest/v1"
 
 
