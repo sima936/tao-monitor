@@ -98,7 +98,7 @@ def run(
     telegram_token: str | None = None,
     telegram_chat: str | None = None,
     output_json: bool = False,
-    fetch_concentration: bool = True,
+    fetch_concentration: bool = False,
     holdings: list[int] | None = None,
     top_n: int = TOP_N,
 ) -> dict:
@@ -257,7 +257,7 @@ def main():
         telegram_token=args.telegram_token,
         telegram_chat=args.telegram_chat,
         output_json=args.json,
-        fetch_concentration=not args.no_concentration,
+        fetch_concentration=False,
         holdings=holdings,
         top_n=args.top_n,
     )
