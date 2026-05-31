@@ -50,7 +50,7 @@ MAX_TOKEN_PRICE = 0.08     # TAO — above this, limited upside
 MIN_POOL_DEPTH = 5.0       # TAO — below this, too illiquid
 MAX_POOL_DEPTH = 200000.0    # TAO — above this, limited upside (TBD, needs tuning)
 MAX_GENIE_SCORE = 0.85     # concentration — above this, manipulation risk
-
+CONVICTION_HOLDS = {0, 4, 51, 64}
 # Scoring weights (sum to 1.0)
 WEIGHT_MARKOV_SIGNAL = 0.30    # bull-bear probability differential
 WEIGHT_TREND_STRENGTH = 0.25   # price vs EMA position
