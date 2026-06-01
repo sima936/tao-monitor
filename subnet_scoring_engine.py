@@ -664,8 +664,8 @@ def score_subnet(
 
     # ── Parameter 1: Genie ───────────────────────────────────────────────────
     s_p1 = p1_score_genie(metrics.genie_score)
-    if metrics.genie_score > 0.75:
-        alerts.append("GENIE_APPROACHING_THRESHOLD")
+    
+        
 
     # ── Parameter 2: Macro alignment ─────────────────────────────────────────
     s_p2 = p2_score_macro(macro)
