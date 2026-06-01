@@ -152,7 +152,7 @@ def handle_holdings() -> None:
     try:
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "run_scoring.py"),
-             "--no-concentration"],
+             "--no-concentration", "--telegram-token", ""],
             capture_output=True, text=True, timeout=60,
             env={**os.environ}, cwd=str(SCRIPT_DIR),
         )
