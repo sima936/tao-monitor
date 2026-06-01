@@ -177,7 +177,7 @@ def run(
                 f"FAILED pre-filter: {f['reason']}"
             )
 
-    for s in result.ranked:
+    for s in result.ranked_by_entry:
         if s.subnet_id in holdings and "MARKOV_BEAR_REGIME" in s.alert_flags:
             critical_alerts.append(
                 f"⚠️ SN{s.subnet_id} ({s.name}) in BEAR regime "
@@ -193,7 +193,7 @@ def run(
         "timestamp": result.timestamp,
         "passed": result.passed_filters,
         "failed": result.failed_filters,
-        "top_subnet": result.ranked[0].name if result.ranked else "none",
+        "top_subnet": result.ranked_by_entry[0].name if result.ranked_by_entry else "none",
         "critical_alerts": len(critical_alerts),
         "elapsed_seconds": round(elapsed, 1),
     }
