@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-OUTPUT_PATH = Path("/home/simar/tao-monitor/tao_macro.json")
+OUTPUT_PATH = Path(__file__).parent / "tao_macro.json"
 
 # TAO trades on some exchanges as TAO-USD via yfinance
 # If TAO-USD fails, fall back to writing a "unavailable" state
