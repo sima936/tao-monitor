@@ -300,8 +300,9 @@ def apply_pre_filters(m: SubnetMetrics) -> FilterResult:
         return FilterResult.FAIL_POOL_MIN
     if m.pool_depth > MAX_POOL_DEPTH:
         return FilterResult.FAIL_POOL_MAX
-    if m.genie_score >= MAX_GENIE_SCORE:
-        return FilterResult.FAIL_GENIE
+    # if m.genie_score >= MAX_GENIE_SCORE:
+    #     return FilterResult.FAIL_GENIE
+        
     return FilterResult.PASS
 
 
