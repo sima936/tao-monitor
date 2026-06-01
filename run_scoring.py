@@ -67,7 +67,7 @@ TOP_N = 5  # reduced from 10 — keeps alerts shorter
 
 # Alert frequency control
 DIGEST_INTERVAL_HOURS = int(os.environ.get("DIGEST_HOURS", 4))
-STATE_FILE = Path(os.environ.get("STATE_FILE", "/home/simar/tao-monitor/scoring_state.json"))
+STATE_FILE = Path(os.environ.get("STATE_FILE", str(Path(__file__).parent / "scoring_state.json")))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -253,7 +253,7 @@ def load_tao_macro_signal() -> dict | None:
     
     Falls back gracefully if missing.
     """
-    macro_path = Path("/home/simar/tao-monitor/tao_macro.json")
+    macro_path = Path(__file__).parent / "tao_macro.json"
     try:
         if not macro_path.exists():
             return None
