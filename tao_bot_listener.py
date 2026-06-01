@@ -147,33 +147,44 @@ def handle_macro() -> None:
 
 
 def handle_holdings() -> None:
-    """Show current holdings status — runs a fresh scoring cycle."""
+    """Show current holdings status — runs scoring directly, no Telegram side-effect."""
     send("⏳ Checking holdings...")
     try:
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "run_scoring.py"),
-             "--no-concentration", "--telegram-token", ""],
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ}, cwd=str(SCRIPT_DIR),
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from run_scoring import run as run_scoring
+        HOLDINGS = [0, 4, 51, 62, 64, 68, 75]
+        result = run_scoring(
+            api_key=API_KEY,
+            telegram_token=None,
+            fetch_concentration=False,
+            holdings=HOLDINGS,
+            top_n=5,
         )
-        if result.returncode != 0:
-            send(f"🔴 Scoring failed:\n<pre>{result.stderr[-300:]}</pre>")
+        if "error" in result:
+            send(f"🔴 Scoring error: {result['error']}")
             return
-        # Parse holdings status from stdout text output
-        holdings_ids = [0, 4, 51, 62, 64, 68, 75]
+
+        # Re-run to get the actual ScoringResult object
+        from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics
+        from subnet_scoring_engine import run_scoring_cycle, apply_pre_filters, FilterResult
+        client = TaostatsClient(api_key=API_KEY)
+        all_metrics = fetch_all_subnet_metrics(client, fetch_concentration=False)
+        scoring_result = run_scoring_cycle(all_metrics, top_n=5)
+
         lines = ["📋 <b>Holdings Status</b>\n━━━━━━━━━━━━━━━━━━━━"]
-        stdout = result.stdout
-        for sn_id in holdings_ids:
-            if f"SN{sn_id}" in stdout:
-                # Find the line mentioning this subnet
-                for line in stdout.split("\n"):
-                    if f"SN{sn_id}" in line:
-                        if "fail_" in line:
-                            lines.append(f"🔴 {line.strip()}")
-                        elif "Entry:" in line or "Score:" in line:
-                            lines.append(f"✅ {line.strip()}")
-                        break
-        send("\n".join(lines) if len(lines) > 1 else "✅ All holdings passing filters")
+        scored = {s.subnet_id: s for s in scoring_result.ranked_by_health}
+        failed = {f["subnet_id"]: f["reason"] for f in scoring_result.filtered_out}
+
+        for sn_id in HOLDINGS:
+            if sn_id in failed:
+                lines.append(f"🔴 SN{sn_id} — {failed[sn_id]}")
+            elif sn_id in scored:
+                s = scored[sn_id]
+                chg = f" 24h:{s.pct_change_24h:+.0%}" if s.pct_change_24h is not None else ""
+                lines.append(f"✅ SN{sn_id} ({s.name}) H:{s.health_score:.0f}{chg}")
+            else:
+                lines.append(f"✅ SN{sn_id} — passing")
+        send("\n".join(lines))
     except Exception as e:
         send(f"🔴 Error checking holdings: {e}")
 
