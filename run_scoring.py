@@ -103,12 +103,12 @@ def extract_state_snapshot(result, holdings: list[int]) -> dict:
 
     # Alert flags on holdings that passed
     holding_alerts = {}
-    for s in result.ranked:
+    for s in result.ranked_by_entry:
         if s.subnet_id in holding_set and s.alert_flags:
             holding_alerts[s.subnet_id] = sorted(s.alert_flags)
 
     # Top 5 subnet IDs (order matters)
-    top5_ids = [s.subnet_id for s in result.ranked[:5]]
+    top5_ids = [s.subnet_id for s in result.ranked_by_entry[:5]]
 
     return {
         "failing_holdings": failing,
@@ -380,7 +380,7 @@ def run(
     for f in result.filtered_out:
         if f["subnet_id"] in holdings:
             critical_alerts.append(f"SN{f['subnet_id']} ({f['name']}): {f['reason']}")
-    for s in result.ranked:
+    for s in result.ranked_by_entry:
         if s.subnet_id in holdings and "MARKOV_BEAR_REGIME" in s.alert_flags:
             critical_alerts.append(f"SN{s.subnet_id} ({s.name}): BEAR regime")
 

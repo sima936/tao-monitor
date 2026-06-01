@@ -1001,115 +1001,45 @@ def print_comparison(result: dict) -> None:
 # Telegram formatter
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_telegram_alert(
-    result: ScoringResult,
-    current_holdings: Optional[list[int]] = None,
-) -> str:
+def format_telegram_alert(result, current_holdings=None, macro_header=None):
     lines = [
         "📊 TAO MONITOR v4 — Scoring Update",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"🌍 MACRO: {result.macro.strategy_mode}",
-        f"   Signal: {result.macro.signal:+.3f} | Bull: {result.macro.bull_prob:.0%} Bear: {result.macro.bear_prob:.0%}",
-        "",
-        f"🟢 {result.passed_filters}/{result.total_subnets} subnets passing filters",
-        "",
     ]
-
-    # Alerts on holdings
+    if macro_header:
+        lines.append(macro_header)
+        lines.append("")
+    lines.append(f"🟢 {result.passed_filters}/{result.total_subnets} subnets passing filters")
+    lines.append("")
     alert_lines = []
     if current_holdings:
         for f in result.filtered_out:
             if f["subnet_id"] in current_holdings:
                 alert_lines.append(f"🔴 SN{f['subnet_id']} ({f['name']}) — {f['reason']}")
-        for s in result.ranked_by_health:
-            if s.subnet_id in current_holdings:
+        for s in result.ranked_by_entry:
+            if s.subnet_id in current_holdings and s.alert_flags:
                 for flag in s.alert_flags:
-                    alert_lines.append(f"⚠️ SN{s.subnet_id} ({s.name}) — {flag}")
+                    if flag in ("MARKOV_BEAR_REGIME", "BELOW_EMA_DOWNTREND", "GENIE_APPROACHING_THRESHOLD"):
+                        alert_lines.append(f"⚠️ SN{s.subnet_id} ({s.name}) — {flag}")
     if alert_lines:
         lines.append("🚨 ALERTS:")
         lines.extend(alert_lines)
         lines.append("")
-
-    # Take-profit signals on holdings
-    tp_lines = []
-    if current_holdings:
-        for s in result.ranked_by_health:
-            if s.subnet_id in current_holdings and s.take_profit_flags:
-                for flag in s.take_profit_flags:
-                    tp_lines.append(f"  💰 SN{s.subnet_id} ({s.name}) — {flag}")
-    if tp_lines:
-        lines.append("💰 TAKE PROFIT SIGNALS:")
-        lines.extend(tp_lines)
-        lines.append("")
-
-    # Holdings health table
-    if current_holdings:
-        held = [s for s in result.ranked_by_health if s.subnet_id in current_holdings]
-        if held:
-            lines.append("📌 HOLDINGS HEALTH:")
-            for s in held:
-                pool_icon = "📈" if s.pool_depth_trending == "up" else ("📉" if s.pool_depth_trending == "down" else "➡️")
-                ema_tag = f"{s.pct_from_ema:+.0%}EMA" if s.pct_from_ema is not None else ""
-                alpha_tag = f" α{s.relative_perf_vs_tao:+.0%}" if s.relative_perf_vs_tao is not None else ""
-                lines.append(
-                    f"  SN{s.subnet_id} ({s.name}) — Health: {s.health_score:.0f}/100"
-                    f" [{s.markov_regime} p{s.markov_persistence:.0%}]"
-                    f" {ema_tag}{alpha_tag} {pool_icon}"
-                )
-            lines.append("")
-
-    # Top entry opportunities
-    top = [s for s in result.ranked_by_entry[:result.top_n]
-           if not current_holdings or s.subnet_id not in current_holdings]
-    if top and result.macro.regime != MacroRegime.BEAR:
+    top = result.ranked_by_entry[:result.top_n]
+    if top:
         lines.append("📈 TOP ENTRY OPPORTUNITIES:")
-        for i, s in enumerate(top[:5], 1):
-            pb_tag  = f" 📉{s.pct_from_recent_high:.0%}high" if s.pct_from_recent_high else ""
-            ema_tag = f" EMA{s.pct_from_ema:+.0%}" if s.pct_from_ema else ""
-            pool_icon = "📈" if s.pool_depth_trending == "up" else ""
-            lines.append(
-                f"  {i}. SN{s.subnet_id} ({s.name}) — Entry: {s.entry_score:.0f}/100"
-                f" [{s.markov_regime}]{pb_tag}{ema_tag} | Genie:{s.genie_score_raw:.2f}{pool_icon}"
-            )
+        for i, s in enumerate(top, 1):
+            held = " 📌" if current_holdings and s.subnet_id in current_holdings else ""
+            regime = f" [{s.markov_regime}]" if s.markov_available else ""
+            mom = f" 24h:{s.pct_change_24h:+.0%}" if s.pct_change_24h is not None else ""
+            ema = f" EMA:{s.pct_from_ema:+.0%}" if s.pct_from_ema is not None else ""
+            lines.append(f"{i}. SN{s.subnet_id} ({s.name}) — Entry:{s.entry_score:.0f}/100{regime}{mom}{ema} | Genie:{s.genie_score_raw:.2f}{held}")
         lines.append("")
-    elif result.macro.regime == MacroRegime.BEAR:
-        lines.append("🔴 BEAR MACRO — No new entries. Preserve capital.")
-        lines.append("")
-
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⏰ {result.timestamp}")
     return "\n".join(lines)
 
-
-def to_json(result: ScoringResult) -> str:
-    def _score_to_dict(s: SubnetScore) -> dict:
-        d = asdict(s)
-        return d
-    data = {
-        "timestamp": result.timestamp,
-        "macro": {
-            "regime": result.macro.regime.value,
-            "signal": result.macro.signal,
-            "bull_prob": result.macro.bull_prob,
-            "bear_prob": result.macro.bear_prob,
-            "strategy_mode": result.macro.strategy_mode,
-        },
-        "summary": {
-            "total_subnets": result.total_subnets,
-            "passed_filters": result.passed_filters,
-            "failed_filters": result.failed_filters,
-        },
-        "ranked_by_entry":  [_score_to_dict(s) for s in result.ranked_by_entry],
-        "ranked_by_health": [_score_to_dict(s) for s in result.ranked_by_health],
-        "filtered_out": result.filtered_out,
-    }
-    return json.dumps(data, indent=2, default=str)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Demo + comparison test
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _make_demo_subnets() -> tuple[list[SubnetMetrics], list[float]]:
     np.random.seed(42)
@@ -1233,3 +1163,20 @@ if __name__ == "__main__":
     print("=" * 62)
     for f in result.filtered_out:
         print(f"  SN{f['subnet_id']} ({f['name']}) — {f['reason']}")
+
+
+def to_json(result) -> str:
+    """Serialize full scoring result to JSON for dashboard/API."""
+    from dataclasses import asdict
+    import json
+    data = {
+        "timestamp": result.timestamp,
+        "summary": {
+            "total_subnets": result.total_subnets,
+            "passed_filters": result.passed_filters,
+            "failed_filters": result.failed_filters,
+        },
+        "ranked": [asdict(s) for s in result.ranked],
+        "filtered_out": result.filtered_out,
+    }
+    return json.dumps(data, indent=2)
