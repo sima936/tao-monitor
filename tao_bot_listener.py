@@ -247,7 +247,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("TAO bot listener started — polling for commands")
-    send("🤖 TAO Monitor bot listener started. Send /help for commands.")
+    
 
     while True:
         try:
