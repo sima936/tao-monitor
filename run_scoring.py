@@ -244,6 +244,46 @@ def apply_gini_overrides(
 # TAO macro regime (from tao_price_history.json written by a separate fetcher)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def compute_tao_macro_inline(years: int = 1) -> dict | None:
+    """Compute the TAO macro regime in-process — no external file dependency.
+
+    Reproduces fetch_tao_macro.py's output as a dict, so the existing
+    macro_dict_to_state() and format_macro_header() consumers are unchanged.
+    Uses the engine's own TAO_WINDOW / TAO_THRESHOLD as the single source of
+    truth for macro tuning. Returns None on ANY failure, so run() then falls
+    back to the file, then to Unknown — never worse than current behaviour.
+    """
+    try:
+        from markov_regime import analyze, fetch_ticker  # lazy
+        from subnet_scoring_engine import TAO_WINDOW, TAO_THRESHOLD
+    except Exception as e:
+        logger.warning(f"Inline macro import failed: {e}")
+        return None
+
+    close = None
+    for ticker in ("TAO22974-USD", "TAO-USD"):
+        try:
+            c = fetch_ticker(ticker, years=years)
+            if c is not None and len(c) > 30:
+                close = c
+                break
+        except Exception as e:
+            logger.warning(f"Inline macro fetch {ticker} failed: {e}")
+    if close is None or len(close) < 30:
+        logger.warning("Inline macro: no TAO price data — falling back")
+        return None
+
+    try:
+        r = analyze(close, source="TAO-inline",
+                    window=TAO_WINDOW, threshold=TAO_THRESHOLD,
+                    min_train=60, hmm=False)
+        logger.info(f"Inline macro: {r['current_regime']} (signal {r['signal']:+.3f})")
+        return r
+    except Exception as e:
+        logger.warning(f"Inline macro analyze failed: {e}")
+        return None
+
+
 def load_tao_macro_signal() -> dict | None:
     """
     Load TAO macro Markov signal.
@@ -349,8 +389,8 @@ def run(
     # Load Gini cache from SDK fetcher
     gini_cache = load_gini_cache()
 
-    # Load TAO macro signal
-    macro = load_tao_macro_signal()
+    # Load TAO macro signal — inline compute first, file fallback, then Unknown
+    macro = compute_tao_macro_inline() or load_tao_macro_signal()
 
     # Fetch subnet data
     client = TaostatsClient(api_key=api_key)
