@@ -1009,43 +1009,119 @@ def print_comparison(result: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def format_telegram_alert(result, current_holdings=None, macro_header=None):
-    lines = [
-        "📊 TAO MONITOR v4 — Scoring Update",
+    """Holdings-first portfolio report.
+
+    Sections: how your holdings are doing, what to trim/take-profit, what to
+    review/exit, and a non-chasing (pullback) buy read gated by TAO macro.
+    Drives BOTH the scheduled report (run_scoring.py) and on-demand /status.
+
+    `macro_header` is accepted for backward-compat but intentionally ignored —
+    the macro line is built from result.macro so there is no duplicate header.
+    """
+    holdings = set(current_holdings or [])
+
+    def gini_str(g):
+        # 0.5 is the placeholder sentinel from taostats_fetch (no metagraph yet).
+        return "n/a*" if abs(g - 0.5) < 1e-9 else f"{g:.2f}"
+
+    def conc_tag(g):
+        return "  ⚠️CONCENTRATION" if (abs(g - 0.5) > 1e-9 and g >= 0.85) else ""
+
+    def pct(x):
+        return "n/a" if x is None else f"{x * 100:+.0f}%"
+
+    def dot(r):
+        return {"Bull": "🟢", "Bear": "🔴", "Sideways": "⚪"}.get(r, "❔")
+
+    m = result.macro
+    by_id = {s.subnet_id: s for s in result.ranked_by_entry}
+    filtered_by_id = {f["subnet_id"]: f for f in result.filtered_out}
+
+    L = [
+        "📊 TAO MONITOR — Portfolio Report",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🌐 TAO macro: {m.regime.value} (signal {m.signal:+.2f})",
+        f"   {m.strategy_mode}",
         "",
     ]
-    if macro_header:
-        lines.append(macro_header)
-        lines.append("")
-    lines.append(f"🟢 {result.passed_filters}/{result.total_subnets} subnets passing filters")
-    lines.append("")
-    alert_lines = []
-    if current_holdings:
-        for f in result.filtered_out:
-            if f["subnet_id"] in current_holdings:
-                alert_lines.append(f"🔴 SN{f['subnet_id']} ({f['name']}) — {f['reason']}")
-        for s in result.ranked_by_entry:
-            if s.subnet_id in current_holdings and s.alert_flags:
-                for flag in s.alert_flags:
-                    if flag in ("MARKOV_BEAR_REGIME", "BELOW_EMA_DOWNTREND", "GENIE_APPROACHING_THRESHOLD"):
-                        alert_lines.append(f"⚠️ SN{s.subnet_id} ({s.name}) — {flag}")
-    if alert_lines:
-        lines.append("🚨 ALERTS:")
-        lines.extend(alert_lines)
-        lines.append("")
-    top = result.ranked_by_entry[:result.top_n]
-    if top:
-        lines.append("📈 TOP ENTRY OPPORTUNITIES:")
-        for i, s in enumerate(top, 1):
-            held = " 📌" if current_holdings and s.subnet_id in current_holdings else ""
-            regime = f" [{s.markov_regime}]" if s.markov_available else ""
-            mom = f" 24h:{s.pct_change_24h:+.0%}" if s.pct_change_24h is not None else ""
-            ema = f" EMA:{s.pct_from_ema:+.0%}" if s.pct_from_ema is not None else ""
-            lines.append(f"{i}. SN{s.subnet_id} ({s.name}) — Entry:{s.entry_score:.0f}/100{regime}{mom}{ema} | Genie:{s.genie_score_raw:.2f}{held}")
-        lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ {result.timestamp}")
-    return "\n".join(lines)
+
+    # 1. Holdings first — weakest health at top so problems surface.
+    held_scores = sorted(
+        (by_id[h] for h in holdings if h in by_id),
+        key=lambda s: s.health_score,
+    )
+    L.append("💼 YOUR HOLDINGS  (health 0-100)")
+    if not held_scores and not any(h in filtered_by_id for h in holdings):
+        L.append("  (no holdings data this cycle)")
+    for s in held_scores:
+        L.append(
+            f"  SN{s.subnet_id} {s.name} [{s.health_score:.0f}] "
+            f"{dot(s.markov_regime)}{s.markov_regime} "
+            f"{s.token_price:.4f}τ  24h:{pct(s.pct_change_24h)} 7d:{pct(s.pct_change_7d)}  "
+            f"Gini:{gini_str(s.genie_score_raw)}{conc_tag(s.genie_score_raw)}"
+        )
+    for h in holdings:
+        if h in filtered_by_id:
+            ff = filtered_by_id[h]
+            L.append(f"  SN{h} {ff['name']} [--]  ⛔ {ff['reason']}")
+    L.append("")
+
+    # 2. Trim / take profit — one line per holding (strongest signal).
+    trims = []
+    for s in held_scores:
+        if s.take_profit_flags:
+            ema = f"{s.pct_from_ema * 100:+.0f}% over EMA" if s.pct_from_ema is not None else "extended"
+            trims.append(f"  SN{s.subnet_id} {s.name} — {ema}, trim into strength")
+    if trims:
+        L.append("🔻 TRIM / TAKE PROFIT")
+        L.extend(trims)
+        L.append("")
+
+    # 3. Review / exit — failed filters + downtrend/bear on holdings.
+    exits = []
+    for h in holdings:
+        if h in filtered_by_id:
+            exits.append(f"  SN{h} {filtered_by_id[h]['name']} — {filtered_by_id[h]['reason']}")
+    for s in held_scores:
+        for flag in s.alert_flags:
+            if flag in ("MARKOV_BEAR_REGIME", "BELOW_EMA_DOWNTREND"):
+                exits.append(f"  SN{s.subnet_id} {s.name} — {flag.lower()} (health {s.health_score:.0f})")
+    if exits:
+        L.append("⚠️ REVIEW / EXIT")
+        L.extend(exits)
+        L.append("")
+
+    # 4. Buy — non-chasing, macro-gated. CHASING-tagged subnets excluded.
+    if m.regime == MacroRegime.BEAR:
+        L.append("🟢 BUY: Bear macro — capital preservation, no new entries.")
+    else:
+        candidates = [
+            s for s in result.ranked_by_entry
+            if s.subnet_id not in holdings
+            and not any("CHASING" in fl for fl in s.entry_flags)
+        ]
+        candidates.sort(key=lambda s: s.entry_score, reverse=True)
+        if m.regime == MacroRegime.BULL:
+            L.append("🟢 BUY THE PULLBACK")
+        else:
+            L.append("👀 WATCH ONLY — hold, don't add (macro not bullish)")
+        shown = 0
+        for s in candidates[:result.top_n]:
+            tag = "pullback" if any("PULLBACK" in fl for fl in s.entry_flags) else "neutral"
+            offhigh = f"{s.pct_from_recent_high * 100:+.0f}% off high" if s.pct_from_recent_high is not None else ""
+            L.append(
+                f"  {shown + 1}. SN{s.subnet_id} {s.name} — entry {s.entry_score:.0f} "
+                f"[{tag}] {offhigh}  Gini:{gini_str(s.genie_score_raw)}{conc_tag(s.genie_score_raw)}"
+            )
+            shown += 1
+        if shown == 0:
+            L.append("  Nothing in a clean pullback zone — no chases.")
+    L.append("")
+
+    L.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    L.append(f"⏰ {result.timestamp[:16]}  ·  {result.passed_filters}/{result.total_subnets} passing filters")
+    L.append("* Gini n/a = real concentration not yet fetched (no fake 0.50).")
+    return "\n".join(L)
 
 
 def _make_demo_subnets() -> tuple[list[SubnetMetrics], list[float]]:
