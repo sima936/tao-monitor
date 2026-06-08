@@ -1066,12 +1066,19 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None):
             L.append(f"  SN{h} {ff['name']} [--]  ⛔ {ff['reason']}")
     L.append("")
 
-    # 2. Trim / take profit — one line per holding (strongest signal).
+    # 2. Trim / take profit — only when GENUINELY extended above EMA.
+    #    A take_profit_flag alone isn't enough: require real strength
+    #    (>= +15% over EMA) so we never say "trim into strength" on a holding
+    #    that's actually below its trend (e.g. a bleeding bear-regime name).
+    TRIM_MIN_OVER_EMA = 0.15
     trims = []
     for s in held_scores:
-        if s.take_profit_flags:
-            ema = f"{s.pct_from_ema * 100:+.0f}% over EMA" if s.pct_from_ema is not None else "extended"
-            trims.append(f"  SN{s.subnet_id} {s.name} — {ema}, trim into strength")
+        if (s.take_profit_flags
+                and s.pct_from_ema is not None
+                and s.pct_from_ema >= TRIM_MIN_OVER_EMA):
+            trims.append(
+                f"  SN{s.subnet_id} {s.name} — +{s.pct_from_ema * 100:.0f}% over EMA, trim into strength"
+            )
     if trims:
         L.append("🔻 TRIM / TAKE PROFIT")
         L.extend(trims)
