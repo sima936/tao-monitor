@@ -9,7 +9,7 @@ from urllib.parse import urlparse, parse_qs
 PORT = int(os.environ.get('PORT', 8080))
 USERNAME = os.environ.get('DASHBOARD_USER', 'tao')
 PASSWORD = os.environ.get('DASHBOARD_PASS', 'bittensor')
-TAOSTATS_KEY = 'tao-07fa8ae2-9d1d-4d70-8e91-7bb056604211:be6002dd'
+TAOSTATS_KEY = os.environ.get('TAOSTATS_API_KEY', '')
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
