@@ -10,6 +10,11 @@ PORT = int(os.environ.get('PORT', 8080))
 USERNAME = os.environ.get('DASHBOARD_USER', 'tao')
 PASSWORD = os.environ.get('DASHBOARD_PASS', 'bittensor')
 TAOSTATS_KEY = os.environ.get('TAOSTATS_API_KEY', '')
+SCORE_INGEST_TOKEN = os.environ.get('SCORE_INGEST_TOKEN', '')
+
+# In-memory cache of the cron's last v4 scoring JSON (Railway has no shared disk).
+# Filled by POST /api/ingest-score, served by GET /api/score.
+LATEST_SCORE = None
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -37,10 +42,52 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                     return self.proxy_vtrust()
                 if self.path.startswith('/api/yield'):
                     return self.proxy_yield()
+                if self.path.startswith('/api/score'):
+                    return self.serve_score()
                 return super().do_GET()
         except:
             pass
         self.send_auth_request()
+
+    def do_POST(self):
+        if self.path.rstrip('/') != '/api/ingest-score':
+            self.send_response(404)
+            self.end_headers()
+            return
+        token = self.headers.get('X-Ingest-Token', '')
+        if not SCORE_INGEST_TOKEN or token != SCORE_INGEST_TOKEN:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b'forbidden')
+            return
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length)
+            global LATEST_SCORE
+            LATEST_SCORE = body.decode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+    def serve_score(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if LATEST_SCORE:
+            self.wfile.write(LATEST_SCORE.encode('utf-8'))
+        else:
+            self.wfile.write(json.dumps({
+                'status': 'awaiting_first_scan',
+                'message': 'No scoring run ingested yet.',
+                'ranked': []
+            }).encode())
 
     def proxy_price(self):
         try:

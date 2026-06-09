@@ -178,6 +178,29 @@ def should_send_telegram(
 # Telegram sender
 # ─────────────────────────────────────────────────────────────────────────────
 
+def push_score_to_dashboard(result_json: str) -> None:
+    """POST the v4 scoring JSON to serve.py's in-memory store (Option 1 bridge).
+
+    No-op unless DASHBOARD_INGEST_URL and SCORE_INGEST_TOKEN are both set, so it
+    stays inert on the /status fast path and in local runs.
+    """
+    url = os.environ.get('DASHBOARD_INGEST_URL', '').strip()
+    token = os.environ.get('SCORE_INGEST_TOKEN', '').strip()
+    if not url or not token:
+        logger.info("Dashboard ingest skipped (DASHBOARD_INGEST_URL / SCORE_INGEST_TOKEN unset)")
+        return
+    try:
+        resp = requests.post(
+            url,
+            data=result_json.encode('utf-8'),
+            headers={'X-Ingest-Token': token, 'Content-Type': 'application/json'},
+            timeout=15,
+        )
+        logger.info(f"Dashboard ingest: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Dashboard ingest failed: {e}")
+
+
 def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -551,6 +574,9 @@ def run(
 
     # Score — pass pre-computed macro so scoring engine doesn't recompute with empty data
     result = run_scoring_cycle(all_metrics, top_n=top_n, macro=macro_state)
+
+    # Push the full v4 result to the dashboard's in-memory store (Option 1 bridge)
+    push_score_to_dashboard(to_json(result))
     elapsed = time.time() - start_time
     logger.info(
         f"Scoring complete: {result.passed_filters} passed, "
