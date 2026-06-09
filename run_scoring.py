@@ -62,7 +62,10 @@ logger = logging.getLogger("tao_scoring_runner")
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-CURRENT_HOLDINGS = [0, 4, 51, 62, 64, 68, 75]
+# Last-resort fallback only. The cron now resolves holdings on-chain via
+# fetch_wallet_holdings(); this list is used only if that call fails.
+# Updated Jun 9 to the real on-chain set (was stale: [0,4,51,62,64,68,75]).
+CURRENT_HOLDINGS = [0, 4, 9, 44, 46, 55, 68, 107, 123]
 TOP_N = 5  # reduced from 10 — keeps alerts shorter
 
 # Alert frequency control
@@ -240,6 +243,51 @@ def apply_gini_overrides(
     return all_metrics
 
 
+def fetch_holdings_gini(holdings: list[int], api_key: str) -> dict[int, float]:
+    """In-process Gini fetch for holdings only — Railway-friendly.
+
+    The Infinity8 gini_cache.json path (load_gini_cache) is dead on Railway:
+    the cron runs in an ephemeral container that can't see /home/simar.
+    This computes real Gini for the held subnets in-process via GiniFetcher
+    (SDK → RPC → Taostats fallback). Bounded to holdings, so ~12.5s/subnet on
+    the Taostats fallback (≈100s for 8 subnets) — fine on the 12h cron, but
+    NEVER call this from /status (60s subprocess timeout).
+
+    SN0 (Root/Kraken) is skipped: it always fails the price filter and its
+    metagraph is not a meaningful concentration signal.
+    """
+    targets = [h for h in holdings if h != 0]
+    if not targets:
+        return {}
+    try:
+        from gini_fetch import GiniFetcher
+    except Exception as e:
+        logger.warning(f"GiniFetcher import failed — keeping placeholders: {e}")
+        return {}
+
+    fetcher = GiniFetcher(taostats_api_key=api_key)
+    logger.info(
+        f"Fetching holdings Gini for {targets} via "
+        f"{fetcher.active_source or 'auto'} (skipping SN0)..."
+    )
+    try:
+        scores = fetcher.get_gini_batch(targets)
+    except Exception as e:
+        logger.warning(f"Holdings Gini batch failed — keeping placeholders: {e}")
+        return {}
+
+    # Drop placeholder (0.5) results so we don't overwrite with fake data and
+    # so the real-vs-placeholder count downstream stays honest.
+    real = {k: v for k, v in scores.items() if v != 0.5}
+    dropped = len(scores) - len(real)
+    if dropped:
+        logger.warning(
+            f"{dropped} holdings returned placeholder Gini "
+            f"(source unavailable / endpoint shape changed) — left as placeholder"
+        )
+    return real
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAO macro regime (from tao_price_history.json written by a separate fetcher)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -376,6 +424,7 @@ def run(
     holdings: list[int] | None = None,
     top_n: int = TOP_N,
     force_send: bool = False,
+    holdings_gini: bool = False,
 ) -> dict:
     if holdings is None:
         holdings = CURRENT_HOLDINGS
@@ -386,8 +435,12 @@ def run(
     # Load previous state for change detection
     prev_state = load_state()
 
-    # Load Gini cache from SDK fetcher
+    # Gini: prefer the SDK-written disk cache (Infinity8 co-located runs);
+    # on Railway that cache is unreachable, so optionally fetch holdings Gini
+    # in-process. holdings_gini is opt-in (cron only) — never on /status.
     gini_cache = load_gini_cache()
+    if not gini_cache and holdings_gini:
+        gini_cache = fetch_holdings_gini(holdings, api_key)
 
     # Load TAO macro signal — inline compute first, file fallback, then Unknown
     macro = compute_tao_macro_inline() or load_tao_macro_signal()
@@ -487,6 +540,9 @@ def main():
     parser.add_argument("--holdings", type=str, default=None)
     parser.add_argument("--force-send", action="store_true",
                         help="Send Telegram regardless of change detection")
+    parser.add_argument("--holdings-gini", action="store_true",
+                        help="Fetch real Gini for holdings in-process (cron only — "
+                             "adds ~100s; do NOT use on the 60s /status path)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -500,9 +556,17 @@ def main():
         print("ERROR: TAOSTATS_API_KEY required.", file=sys.stderr)
         sys.exit(1)
 
-    holdings = CURRENT_HOLDINGS
     if args.holdings:
         holdings = [int(x.strip()) for x in args.holdings.split(",")]
+    else:
+        # No explicit holdings (bare cron) — resolve on-chain so the report
+        # never drifts from /status. Fall back to the constant only on failure.
+        try:
+            from taostats_fetch import fetch_wallet_holdings
+            holdings = fetch_wallet_holdings(args.api_key) or CURRENT_HOLDINGS
+        except Exception as e:
+            logger.warning(f"On-chain holdings fetch failed ({e}) — using fallback")
+            holdings = CURRENT_HOLDINGS
 
     result = run(
         api_key=args.api_key,
@@ -513,6 +577,7 @@ def main():
         holdings=holdings,
         top_n=args.top_n,
         force_send=args.force_send,
+        holdings_gini=args.holdings_gini,
     )
 
     if "error" in result:
