@@ -59,9 +59,11 @@ SUBTENSOR_ENDPOINTS = [
 
 # Taostats fallback
 TAOSTATS_BASE    = "https://api.taostats.io"
-# Metagraph lives at /api/metagraph/... (NOT /api/dtao/... — that 404s).
+# Holder concentration ("Genie") comes from the dTao stake_balance endpoint —
+# top alpha holders of the subnet token. NOT the metagraph (validator/neuron
+# stake), which is structurally ~0.95 on every dTao subnet and carries no signal.
 # Verified against docs.taostats.io OpenAPI Jun 2026.
-TAOSTATS_META    = "/api/metagraph/latest/v1"
+TAOSTATS_STAKE   = "/api/dtao/stake_balance/latest/v1"
 TAOSTATS_DELAY   = 12.5   # seconds between calls on free tier
 
 # Cache TTL — Gini doesn't change every 30 minutes meaningfully
@@ -156,27 +158,6 @@ class GiniFetcher:
         top10 = sum(sorted(stakes, reverse=True)[:10])
         return top10 / total
 
-    @staticmethod
-    def _neuron_stake(neuron: dict) -> float:
-        """Extract a neuron's stake, handling pre- and post-dTao shapes.
-
-        Post-dTao the metagraph annotates `stake` as "not used" (0); real
-        weight lives in `total_alpha_stake` (rao), with `alpha_stake` as a
-        secondary. Pre-dTao captures populate `stake`. Prefer the richest
-        non-zero field. Units don't matter — Gini is scale-invariant.
-        """
-        for key in ("total_alpha_stake", "alpha_stake", "stake"):
-            v = neuron.get(key)
-            if v in (None, "", "0", 0):
-                continue
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                continue
-            if f > 0:
-                return f
-        return 0.0
-
     # ── Source 1: Bittensor SDK ───────────────────────────────────────────────
 
     def _gini_via_sdk(self, netuid: int) -> Optional[float]:
@@ -261,7 +242,20 @@ class GiniFetcher:
     # ── Source 3: Taostats API (rate-limited fallback) ────────────────────────
 
     def _gini_via_taostats(self, netuid: int) -> Optional[float]:
-        """Original Taostats metagraph fetch — rate limited fallback."""
+        """Holder-concentration Gini via the dTao stake_balance endpoint.
+
+        Pulls the top 200 alpha holders for the subnet (one page, ordered by
+        balance descending), aggregates by coldkey, and computes the Gini
+        coefficient over the coldkey totals. This is the "top wallet holders"
+        concentration Siam's framework calls "Genie" — token-holder
+        concentration, NOT validator/neuron stake (that is structurally ~0.95
+        on every dTao subnet and so carries no signal).
+
+        limit=200 is the API max, so this is one call per subnet. The
+        small-holder tail beyond rank 200 is omitted, which biases the
+        absolute Gini slightly low, but the cross-subnet signal stays
+        comparable — recalibrate the 0.85 threshold against real values.
+        """
         if not self.taostats_api_key:
             return None
 
@@ -273,10 +267,12 @@ class GiniFetcher:
 
         try:
             resp = requests.get(
-                f"{TAOSTATS_BASE}{TAOSTATS_META}",
-                # limit=1024 is the API max; subnets cap ~256 neurons, so this
-                # pulls the whole metagraph in one page (no pagination needed).
-                params={"netuid": netuid, "limit": 1024},
+                f"{TAOSTATS_BASE}{TAOSTATS_STAKE}",
+                params={
+                    "netuid": netuid,
+                    "order": "balance_as_tao_desc",
+                    "limit": 200,
+                },
                 headers={
                     "Authorization": self.taostats_api_key,
                     "Accept": "application/json",
@@ -284,21 +280,31 @@ class GiniFetcher:
                 timeout=30,
             )
             resp.raise_for_status()
-            neurons = resp.json().get("data", [])
+            rows = resp.json().get("data", [])
 
+            # Aggregate by coldkey — a holder may appear under several hotkeys.
             wallet_stakes: dict[str, float] = {}
-            for neuron in neurons:
-                ck = neuron.get("coldkey", {})
+            for row in rows:
+                ck = row.get("coldkey", {})
                 addr = ck.get("ss58", "unknown") if isinstance(ck, dict) else str(ck)
-                stake = self._neuron_stake(neuron)
-                wallet_stakes[addr] = wallet_stakes.get(addr, 0.0) + stake
+                bal = row.get("balance_as_tao")
+                if bal in (None, ""):
+                    bal = row.get("balance", 0)
+                try:
+                    bal = float(bal)
+                except (TypeError, ValueError):
+                    bal = 0.0
+                if bal > 0:
+                    wallet_stakes[addr] = wallet_stakes.get(addr, 0.0) + bal
 
-            # Gini is scale-invariant, so leaving stakes in rao is fine.
-            if wallet_stakes and sum(wallet_stakes.values()) > 0:
+            # Need at least 2 holders for a meaningful Gini. Scale-invariant,
+            # so leaving balances in rao is fine.
+            if len(wallet_stakes) >= 2 and sum(wallet_stakes.values()) > 0:
                 return self._compute_gini(list(wallet_stakes.values()))
+            logger.debug(f"SN{netuid}: stake_balance returned {len(wallet_stakes)} holders — no Gini")
 
         except Exception as e:
-            logger.warning(f"Taostats fallback failed for SN{netuid}: {e}")
+            logger.warning(f"Taostats stake_balance failed for SN{netuid}: {e}")
 
         return None
 
