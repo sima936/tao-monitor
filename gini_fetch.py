@@ -59,7 +59,9 @@ SUBTENSOR_ENDPOINTS = [
 
 # Taostats fallback
 TAOSTATS_BASE    = "https://api.taostats.io"
-TAOSTATS_META    = "/api/dtao/metagraph/latest/v1"
+# Metagraph lives at /api/metagraph/... (NOT /api/dtao/... — that 404s).
+# Verified against docs.taostats.io OpenAPI Jun 2026.
+TAOSTATS_META    = "/api/metagraph/latest/v1"
 TAOSTATS_DELAY   = 12.5   # seconds between calls on free tier
 
 # Cache TTL — Gini doesn't change every 30 minutes meaningfully
@@ -153,6 +155,27 @@ class GiniFetcher:
             return 0.0
         top10 = sum(sorted(stakes, reverse=True)[:10])
         return top10 / total
+
+    @staticmethod
+    def _neuron_stake(neuron: dict) -> float:
+        """Extract a neuron's stake, handling pre- and post-dTao shapes.
+
+        Post-dTao the metagraph annotates `stake` as "not used" (0); real
+        weight lives in `total_alpha_stake` (rao), with `alpha_stake` as a
+        secondary. Pre-dTao captures populate `stake`. Prefer the richest
+        non-zero field. Units don't matter — Gini is scale-invariant.
+        """
+        for key in ("total_alpha_stake", "alpha_stake", "stake"):
+            v = neuron.get(key)
+            if v in (None, "", "0", 0):
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                return f
+        return 0.0
 
     # ── Source 1: Bittensor SDK ───────────────────────────────────────────────
 
@@ -251,7 +274,9 @@ class GiniFetcher:
         try:
             resp = requests.get(
                 f"{TAOSTATS_BASE}{TAOSTATS_META}",
-                params={"netuid": netuid},
+                # limit=1024 is the API max; subnets cap ~256 neurons, so this
+                # pulls the whole metagraph in one page (no pagination needed).
+                params={"netuid": netuid, "limit": 1024},
                 headers={
                     "Authorization": self.taostats_api_key,
                     "Accept": "application/json",
@@ -265,12 +290,11 @@ class GiniFetcher:
             for neuron in neurons:
                 ck = neuron.get("coldkey", {})
                 addr = ck.get("ss58", "unknown") if isinstance(ck, dict) else str(ck)
-                stake = float(neuron.get("stake", 0))
-                if stake > 1_000_000:
-                    stake /= 1e9
+                stake = self._neuron_stake(neuron)
                 wallet_stakes[addr] = wallet_stakes.get(addr, 0.0) + stake
 
-            if wallet_stakes:
+            # Gini is scale-invariant, so leaving stakes in rao is fine.
+            if wallet_stakes and sum(wallet_stakes.values()) > 0:
                 return self._compute_gini(list(wallet_stakes.values()))
 
         except Exception as e:
