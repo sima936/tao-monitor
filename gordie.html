@@ -587,6 +587,8 @@ const WATCHLIST = {
   93:'Bitcast', 21:'AdTao'
 };
 
+// Subnet display names — fallback only when the live pools feed lacks a netuid
+// (e.g. SN0 Root, or a held subnet with no dTAO pool). Live pool.name always wins.
 const SUBNET_NAME_FALLBACK = {
   0:'Root', 4:'Targon', 9:'Iota', 44:'Score', 46:'Zipcode',
   55:'NIOME', 68:'NOVA', 107:'Minos', 123:'MANTIS',
@@ -893,7 +895,11 @@ async function fetchPortfolioStakes() {
   return r.json();
 }
 
-function renderPortfolio(stakeData, priceData) {
+function resolveSubnetName(netuid, nameByNetuid) {
+  return (nameByNetuid && nameByNetuid[netuid]) || SUBNET_NAME_FALLBACK[netuid] || ('SN' + netuid);
+}
+
+function renderPortfolio(stakeData, priceData, nameByNetuid) {
   const tbody = document.getElementById('portfolio-body');
   const gbp = priceData.bittensor?.gbp || 0;
   const positions = (stakeData.data || [])
@@ -903,7 +909,7 @@ function renderPortfolio(stakeData, priceData) {
     })
     .map(s => ({
       netuid: parseInt(s.netuid),
-      name: s.hotkey_name || `SN${s.netuid}`,
+      name: resolveSubnetName(parseInt(s.netuid), nameByNetuid),
       tao: parseInt(s.balance_as_tao || '0') / 1e9,
     }))
     .sort((a, b) => b.tao - a.tao);
@@ -970,9 +976,16 @@ async function loadData() {
   try {
     const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice()]);
 
+    // netuid -> subnet name from the live pools feed (authoritative)
+    const nameByNetuid = {};
+    (poolData.data || []).forEach(p => {
+      const n = parseInt(p.netuid);
+      if (!isNaN(n) && p.name) nameByNetuid[n] = p.name;
+    });
+
     // Portfolio — fetch in parallel, don't block scanner if it fails
     fetchPortfolioStakes().then(stakeData => {
-      renderPortfolio(stakeData, priceData);
+      renderPortfolio(stakeData, priceData, nameByNetuid);
     }).catch(err => {
       console.warn('Portfolio fetch failed:', err);
       document.getElementById('portfolio-body').innerHTML =
