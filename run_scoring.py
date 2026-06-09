@@ -289,6 +289,81 @@ def fetch_holdings_gini(holdings: list[int], api_key: str) -> dict[int, float]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Real price history for holdings (replaces the 9-bar synthetic series)
+# ─────────────────────────────────────────────────────────────────────────────
+
+POOL_HISTORY_PATH = "/api/dtao/pool/history/v1"
+
+
+def fetch_holdings_history(
+    client, holdings: list[int], limit: int = 200
+) -> dict[int, tuple[list[float], list[str]]]:
+    """Fetch REAL daily price history for holdings via pool/history.
+
+    pool/latest no longer returns seven_day_prices, so every subnet currently
+    runs Markov/trend/momentum on a 9-bar SYNTHETIC series reconstructed from
+    just the 24h/7d % anchors. This pulls real daily closes (frequency=by_day,
+    oldest-first) so the held subnets get genuine regime/trend signal.
+
+    Bounded to holdings (skip SN0/Root), ~12.5s/subnet — cron only, never on
+    the 60s /status path. Returns {netuid: (prices, timestamps)} oldest-first;
+    subnets with <9 real bars are omitted (synthetic is left in place).
+    """
+    out: dict[int, tuple[list[float], list[str]]] = {}
+    for netuid in [h for h in holdings if h != 0]:
+        try:
+            resp = client.get(
+                POOL_HISTORY_PATH,
+                params={
+                    "netuid": netuid,
+                    "frequency": "by_day",
+                    "limit": limit,
+                    "order": "timestamp_asc",
+                },
+            )
+            rows = resp.get("data", []) if isinstance(resp, dict) else []
+        except Exception as e:
+            logger.warning(f"History fetch failed for SN{netuid}: {e}")
+            continue
+
+        prices: list[float] = []
+        ts: list[str] = []
+        for row in rows:
+            try:
+                p = float(row.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if p > 0:
+                prices.append(p)
+                ts.append(row.get("timestamp", ""))
+
+        if len(prices) >= 9:
+            out[netuid] = (prices, ts)
+            logger.info(f"SN{netuid}: {len(prices)} real daily bars")
+        else:
+            logger.info(f"SN{netuid}: only {len(prices)} real bars — keeping synthetic")
+    return out
+
+
+def apply_history_overrides(
+    all_metrics: list, history: dict[int, tuple[list[float], list[str]]]
+) -> list:
+    """Swap synthetic price_history for real bars where we fetched them."""
+    if not history:
+        return all_metrics
+    by_id = {m.subnet_id: m for m in all_metrics}
+    applied = 0
+    for netuid, (prices, ts) in history.items():
+        m = by_id.get(netuid)
+        if m is not None:
+            m.price_history = prices
+            m.timestamps = ts
+            applied += 1
+    logger.info(f"Applied real price history to {applied} holdings")
+    return all_metrics
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAO macro regime (from tao_price_history.json written by a separate fetcher)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -425,6 +500,7 @@ def run(
     top_n: int = TOP_N,
     force_send: bool = False,
     holdings_gini: bool = False,
+    holdings_history: bool = False,
 ) -> dict:
     if holdings is None:
         holdings = CURRENT_HOLDINGS
@@ -463,6 +539,12 @@ def run(
 
     # Apply real Gini scores where available
     all_metrics = apply_gini_overrides(all_metrics, gini_cache)
+
+    # Replace synthetic 9-bar history with real daily bars for holdings (opt-in,
+    # cron only — adds ~12.5s/holding; never on the 60s /status path).
+    if holdings_history:
+        history = fetch_holdings_history(client, holdings)
+        all_metrics = apply_history_overrides(all_metrics, history)
 
     # Convert macro dict → TaoMacroState for scoring engine
     macro_state = macro_dict_to_state(macro)
@@ -543,6 +625,9 @@ def main():
     parser.add_argument("--holdings-gini", action="store_true",
                         help="Fetch real Gini for holdings in-process (cron only — "
                              "adds ~100s; do NOT use on the 60s /status path)")
+    parser.add_argument("--holdings-history", action="store_true",
+                        help="Fetch real daily price history for holdings (cron only — "
+                             "adds ~100s; replaces synthetic bars; not on /status)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -578,6 +663,7 @@ def main():
         top_n=args.top_n,
         force_send=args.force_send,
         holdings_gini=args.holdings_gini,
+        holdings_history=args.holdings_history,
     )
 
     if "error" in result:
