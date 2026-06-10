@@ -508,23 +508,27 @@ footer {
 
   <!-- Opportunities Tab -->
   <div class="tab-content" id="tab-opportunities">
-    <div class="section-title">Top Scoring Subnets <span class="badge" id="opp-badge">—</span></div>
+    <div class="section-title">Top Opportunities — v4 engine <span class="badge" id="opp-badge">—</span></div>
+    <div id="opp-macro"></div>
+    <div style="font-size:0.7rem;color:var(--muted);margin:0.25rem 0 0.5rem">
+      Real-data subnets only (data-maturity 100), sorted by entry_score (macro-scaled). Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
+    </div>
     <table>
       <thead>
         <tr>
-          <th data-sort="netuid">SN</th>
-          <th data-sort="name">Name</th>
-          <th data-sort="score">Score</th>
-          <th data-sort="price">Price (τ)</th>
-          <th data-sort="pct_day">24H%</th>
-          <th data-sort="pct_week">7D%</th>
-          <th data-sort="pct_month">30D%</th>
-          <th data-sort="pool_depth">Pool (τ)</th>
-          <th class="hide-mobile">Fear/Greed</th>
+          <th>SN</th>
+          <th>Name</th>
+          <th>Entry</th>
+          <th>Health</th>
+          <th>Regime</th>
+          <th>24H%</th>
+          <th>7D%</th>
+          <th>Gini</th>
+          <th class="hide-mobile">Signals</th>
         </tr>
       </thead>
       <tbody id="opportunities-body">
-        <tr><td colspan="9" class="loading"><span class="spinner"></span>Scanning...</td></tr>
+        <tr><td colspan="9" class="loading"><span class="spinner"></span>Loading v4 score…</td></tr>
       </tbody>
     </table>
   </div>
@@ -644,6 +648,30 @@ async function fetchPrice() {
   const r = await fetch('/api/price');
   if (!r.ok) throw new Error('Price fetch failed');
   return r.json();
+}
+
+// v4 engine score, pushed by the cron to in-memory LATEST_SCORE on the server.
+// Same-origin so the browser resends Basic Auth automatically. Defensive against
+// a stray Python NaN token (json.dumps allow_nan=True) that would otherwise make
+// JSON.parse throw and blank the whole panel.
+async function fetchScore() {
+  const r = await fetch('/api/score', { cache: 'no-store' });
+  if (!r.ok) throw new Error('Score fetch failed (' + r.status + ')');
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch (e) { return JSON.parse(text.replace(/\bNaN\b/g, 'null').replace(/\b-?Infinity\b/g, 'null')); }
+}
+
+async function loadScore() {
+  try {
+    const score = await fetchScore();
+    renderOpportunities(score);
+  } catch (err) {
+    console.error('loadScore', err);
+    const tbody = document.getElementById('opportunities-body');
+    if (tbody) tbody.innerHTML =
+      '<tr><td colspan="9" style="color:var(--red);text-align:center;padding:2rem">Score fetch failed: ' + err.message + '</td></tr>';
+  }
 }
 
 // ── Pre-Filters (mirrors tao_gordie.py) ─────────────────────────────────────
@@ -800,30 +828,76 @@ function renderWatchlist(results) {
   tbody.innerHTML = html || '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:1rem">No watchlist data</td></tr>';
 }
 
-function renderOpportunities(results) {
-  const tbody = document.getElementById('opportunities-body');
-  const passing = results.filter(r => r.passed).sort((a, b) => (b.score || 0) - (a.score || 0));
+function renderOpportunities(score) {
+  const tbody  = document.getElementById('opportunities-body');
+  const banner = document.getElementById('opp-macro');
+  const badge  = document.getElementById('opp-badge');
 
-  document.getElementById('opp-badge').textContent = passing.length + ' passing';
-
-  if (passing.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No subnets passing all filters — market in downtrend 📉</td></tr>';
+  // Awaiting first cron scan, error payload, or unexpected shape.
+  if (!score || score.status === 'awaiting_first_scan' || !Array.isArray(score.ranked)) {
+    if (badge) badge.textContent = 'awaiting scan';
+    if (banner) banner.innerHTML = '';
+    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No v4 scoring run ingested yet — waiting on the cron (11:00 / 23:00 UTC).</td></tr>';
     return;
   }
 
+  // ── Macro banner (entry_score is already macro-scaled by the engine) ──
+  const m = score.macro;
+  if (banner) {
+    if (m && m.regime && m.regime !== 'Unknown') {
+      const reg = m.regime;
+      const col = reg === 'Bear' ? 'var(--red)' : reg === 'Bull' ? 'var(--green)' : 'var(--gold)';
+      const note = reg === 'Bear'     ? 'entries suppressed ×0.3 — capital preservation'
+                 : reg === 'Sideways' ? 'entries dampened ×0.5 — hold conviction'
+                 : reg === 'Bull'     ? 'entries scaled ×0.7 — rotate actively'
+                 : '';
+      const sig = (m.signal === null || m.signal === undefined) ? '—' : m.signal.toFixed(2);
+      banner.innerHTML =
+        `<div style="border-left:3px solid ${col};padding:0.4rem 0.6rem;background:rgba(255,255,255,0.02);border-radius:4px">
+           <strong style="color:${col}">TAO macro: ${reg}</strong>
+           <span style="color:var(--muted)"> · signal ${sig} · ${note}</span>
+         </div>`;
+    } else {
+      banner.innerHTML = '';
+    }
+  }
+
+  // ── Gate: real-data only. Engine sets p9_data_maturity == 100 when enriched. ──
+  const ranked = score.ranked;
+  const real = ranked.filter(r => r.params && r.params.p9_data_maturity === 100);
+  const hidden = ranked.length - real.length;
+  real.sort((a, b) => (b.entry_score || 0) - (a.entry_score || 0)); // defensive re-sort
+
+  if (badge) badge.textContent =
+    real.length + ' real-data' + (hidden > 0 ? ' · ' + hidden + ' hidden' : '');
+
+  if (real.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No subnets at full data-maturity this cycle.</td></tr>';
+    return;
+  }
+
+  const giniStr = g => (g === null || g === undefined) ? 'n/a'
+                     : (Math.abs(g - 0.5) < 1e-9 ? 'n/a' : g.toFixed(2)); // 0.5 = placeholder sentinel
+
   let html = '';
-  passing.forEach(r => {
-    const m = r.metrics;
+  real.forEach(r => {
+    const held   = (r.subnet_id in HOLDINGS) ? ' 📌' : (r.subnet_id in WATCHLIST ? ' 👁' : '');
+    const regime = r.markov_available ? (r.markov_regime || '—') : 'n/a';
+    const regCls = regime === 'Bull' ? 'pct-positive' : regime === 'Bear' ? 'pct-negative' : 'pct-neutral';
+    const d24 = (r.pct_change_24h === null || r.pct_change_24h === undefined) ? null : r.pct_change_24h * 100;
+    const d7  = (r.pct_change_7d  === null || r.pct_change_7d  === undefined) ? null : r.pct_change_7d  * 100;
+    const flags = [].concat(r.entry_flags || [], r.take_profit_flags || [], r.alert_flags || [])
+      .map(f => `<span class="tag tag-fail" style="font-size:0.55rem">${String(f).toLowerCase()}</span>`).join(' ');
     html += `<tr class="pass-row">
-      <td>SN${m.netuid}</td>
-      <td><strong>${m.name}</strong></td>
-      <td>${scoreCell(r.score)}</td>
-      <td>${m.price ? m.price.toFixed(4) : '—'}</td>
-      <td>${pctCell(m.pct_day)}</td>
-      <td>${pctCell(m.pct_week)}</td>
-      <td>${pctCell(m.pct_month)}</td>
-      <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
-      <td class="hide-mobile">${m.fear_greed ? m.fear_greed.toFixed(0) : '—'}</td>
+      <td>SN${r.subnet_id}${held}</td>
+      <td><strong>${r.name}</strong></td>
+      <td>${scoreCell(Math.round(r.entry_score))}</td>
+      <td>${scoreCell(Math.round(r.health_score))}</td>
+      <td><span class="${regCls}">${regime}</span></td>
+      <td>${pctCell(d24)}</td>
+      <td>${pctCell(d7)}</td>
+      <td>${giniStr(r.genie_score_raw)}</td>
+      <td class="hide-mobile">${flags || '—'}</td>
     </tr>`;
   });
   tbody.innerHTML = html;
@@ -1039,9 +1113,9 @@ async function loadData() {
     allSubnets = results;
     renderHoldings(results);
     renderWatchlist(results);
-    renderOpportunities(results);
     renderAllSubnets(results);
     renderFilterBreakdown(results);
+    // Opportunities tab is driven by the v4 engine via loadScore() (/api/score), not the browser-side pool scorer.
 
     dot.className = 'dot';
     statusText.textContent = 'Live';
@@ -1068,7 +1142,9 @@ document.querySelectorAll('th[data-sort]').forEach(th => {
 
 // ── Auto refresh every 5 min ────────────────────────────────────────────────
 loadData();
+loadScore();
 setInterval(loadData, 300000);
+setInterval(loadScore, 300000);
 </script>
 </body>
 </html>
