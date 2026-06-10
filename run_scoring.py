@@ -226,6 +226,62 @@ def push_cost_basis_to_dashboard(cost_basis_json: str) -> None:
         logger.warning(f"Cost-basis ingest failed: {e}")
 
 
+def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int]) -> dict | None:
+    """Map each held netuid → realised+unrealised P&L fraction vs net-invested.
+
+        pnl[netuid] = (current balance_as_tao − net_invested) / net_invested
+
+    net_invested comes from the cost-basis dict (fetch_cost_basis); current
+    balance comes from one stake_balance call (the same endpoint used for
+    holdings resolution). House-money / zero-basis positions (net_invested <= 0,
+    e.g. SN0 Root) are skipped — P&L% is undefined there. Returns None on a
+    fetch failure so the Telegram formatter cleanly falls back to its EMA gate.
+    """
+    positions = (cost_basis or {}).get("positions", {})
+    if not positions:
+        return None
+    try:
+        stakes = client.get_wallet_stakes()
+    except Exception as e:
+        logger.warning(f"P&L gate: stake-balance fetch failed (non-fatal): {e}")
+        return None
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    bal_by_netuid: dict[int, float] = {}
+    for entry in stakes:
+        nid = entry.get("netuid", entry.get("subnet_id"))
+        if nid is None:
+            continue
+        bal = entry.get("balance_as_tao")
+        if bal is None:
+            bal = entry.get("balance", entry.get("stake_as_tao"))
+        bal = _f(bal)
+        if bal is not None:
+            bal_by_netuid[int(nid)] = bal
+
+    pnl: dict[int, float] = {}
+    for h in holdings:
+        pos = positions.get(str(h))
+        if not pos:
+            continue
+        net_inv = _f(pos.get("tao_invested"))
+        if net_inv is None or net_inv <= 0:   # house money / no basis → undefined
+            continue
+        bal = bal_by_netuid.get(h)
+        if bal is None:
+            continue
+        pnl[h] = (bal - net_inv) / net_inv
+
+    if pnl:
+        logger.info("P&L gate: " + ", ".join(f"SN{k} {v*100:+.0f}%" for k, v in pnl.items()))
+    return pnl or None
+
+
 def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -676,10 +732,13 @@ def run(
     # Auto cost-basis (opt-in, cron only — pages stake-event history, ~12.5s/page).
     # Computed here on the always-slow cron and pushed to the dashboard, because
     # serve.py is single-threaded and must never block on a multi-page fetch.
+    # Also yields the real P&L gate for the Telegram trim section.
+    pnl_by_netuid = None
     if cost_basis:
         try:
             cb = fetch_cost_basis(api_key)
             push_cost_basis_to_dashboard(json.dumps(cb))
+            pnl_by_netuid = compute_holdings_pnl(client, cb, holdings)
         except Exception as e:
             logger.warning(f"Cost-basis computation failed (non-fatal): {e}")
 
@@ -696,7 +755,8 @@ def run(
 
     # Build message
     macro_header = format_macro_header(macro)
-    msg = format_telegram_alert(result, current_holdings=holdings, macro_header=macro_header)
+    msg = format_telegram_alert(result, current_holdings=holdings, macro_header=macro_header,
+                                pnl_by_netuid=pnl_by_netuid)
     print(msg)
 
     # Change detection — decide whether to send
