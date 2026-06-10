@@ -16,6 +16,10 @@ SCORE_INGEST_TOKEN = os.environ.get('SCORE_INGEST_TOKEN', '')
 # Filled by POST /api/ingest-score, served by GET /api/score.
 LATEST_SCORE = None
 
+# In-memory cache of the cron's last computed cost-basis JSON.
+# Filled by POST /api/ingest-cost-basis, served by GET /api/cost-basis.
+LATEST_COST_BASIS = None
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class AuthHandler(http.server.SimpleHTTPRequestHandler):
@@ -44,13 +48,16 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                     return self.proxy_yield()
                 if self.path.startswith('/api/score'):
                     return self.serve_score()
+                if self.path.startswith('/api/cost-basis'):
+                    return self.serve_cost_basis()
                 return super().do_GET()
         except:
             pass
         self.send_auth_request()
 
     def do_POST(self):
-        if self.path.rstrip('/') != '/api/ingest-score':
+        path = self.path.rstrip('/')
+        if path not in ('/api/ingest-score', '/api/ingest-cost-basis'):
             self.send_response(404)
             self.end_headers()
             return
@@ -63,8 +70,12 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         try:
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length)
-            global LATEST_SCORE
-            LATEST_SCORE = body.decode('utf-8')
+            if path == '/api/ingest-cost-basis':
+                global LATEST_COST_BASIS
+                LATEST_COST_BASIS = body.decode('utf-8')
+            else:
+                global LATEST_SCORE
+                LATEST_SCORE = body.decode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -87,6 +98,20 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 'status': 'awaiting_first_scan',
                 'message': 'No scoring run ingested yet.',
                 'ranked': []
+            }).encode())
+
+    def serve_cost_basis(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if LATEST_COST_BASIS:
+            self.wfile.write(LATEST_COST_BASIS.encode('utf-8'))
+        else:
+            self.wfile.write(json.dumps({
+                'status': 'awaiting_first_scan',
+                'message': 'No cost-basis run ingested yet.',
+                'positions': {}
             }).encode())
 
     def proxy_price(self):
