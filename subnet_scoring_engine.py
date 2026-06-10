@@ -64,6 +64,12 @@ MAX_GENIE_SCORE  = 0.85
 TP_WARN_PCT      = 0.15    # 15% above EMA → partial trim
 TP_STRONG_PCT    = 0.25    # 25% above EMA → full trim
 
+# Real-P&L take-profit gate. When cost-basis is available (cron path), trim
+# alerts are gated on actual profit vs net-invested rather than the launch-
+# anchored EMA — so we never say "trim into strength" on an underwater name,
+# and a genuinely-in-profit holding at a recent high (Minos-style) surfaces.
+TP_MIN_PROFIT_PCT = 0.0    # must be in real profit to suggest taking it
+
 # Pullback entry zone (% off recent high)
 PB_MIN           = 0.08    # at least 8% off high
 PB_MAX           = 0.35    # not more than 35% (broken)
@@ -1008,7 +1014,8 @@ def print_comparison(result: dict) -> None:
 # Telegram formatter
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_telegram_alert(result, current_holdings=None, macro_header=None):
+def format_telegram_alert(result, current_holdings=None, macro_header=None,
+                          pnl_by_netuid=None):
     """Holdings-first portfolio report.
 
     Sections: how your holdings are doing, what to trim/take-profit, what to
@@ -1017,6 +1024,13 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None):
 
     `macro_header` is accepted for backward-compat but intentionally ignored —
     the macro line is built from result.macro so there is no duplicate header.
+
+    `pnl_by_netuid` (optional) maps held netuid → realised+unrealised P&L
+    fraction vs net-invested (e.g. +0.488 for a +48.8% position). When present
+    (cron path with --cost-basis), the trim/take-profit section is gated on
+    real profit instead of the launch-anchored EMA. When None (the 60s /status
+    fast path, where cost basis is too slow to compute), the section falls back
+    to the original EMA-only gate — behaviour is unchanged.
     """
     holdings = set(current_holdings or [])
 
@@ -1066,16 +1080,35 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None):
             L.append(f"  SN{h} {ff['name']} [--]  ⛔ {ff['reason']}")
     L.append("")
 
-    # 2. Trim / take profit — only when GENUINELY extended above EMA.
-    #    A take_profit_flag alone isn't enough: require real strength
-    #    (>= +15% over EMA) so we never say "trim into strength" on a holding
-    #    that's actually below its trend (e.g. a bleeding bear-regime name).
+    # 2. Trim / take profit.
+    #    When real cost basis is available (pnl_by_netuid), gate on ACTUAL
+    #    profit vs net-invested — the launch-anchored EMA is unreliable here
+    #    (clusters at -0.94..-0.998), so a real +49% winner at a recent high
+    #    must surface and an underwater name must never read "trim into
+    #    strength". When P&L is unknown (the /status fast path), fall back to
+    #    the original EMA gate so that path's behaviour is unchanged.
     TRIM_MIN_OVER_EMA = 0.15
+    pnl_map = pnl_by_netuid or {}
     trims = []
     for s in held_scores:
-        if (s.take_profit_flags
-                and s.pct_from_ema is not None
-                and s.pct_from_ema >= TRIM_MIN_OVER_EMA):
+        if not s.take_profit_flags:
+            continue
+        pnl = pnl_map.get(s.subnet_id)
+        if pnl is not None:
+            # Real basis: only suggest taking profit if actually in profit.
+            if pnl > TP_MIN_PROFIT_PCT:
+                ema_note = (
+                    f", +{s.pct_from_ema * 100:.0f}% over EMA"
+                    if s.pct_from_ema is not None and s.pct_from_ema >= TRIM_MIN_OVER_EMA
+                    else ""
+                )
+                trims.append(
+                    f"  SN{s.subnet_id} {s.name} — +{pnl * 100:.0f}% P&L{ema_note}, "
+                    f"take profit (in real profit at a high)"
+                )
+            # pnl <= threshold → in the red / flat → suppress (no false trim).
+        elif s.pct_from_ema is not None and s.pct_from_ema >= TRIM_MIN_OVER_EMA:
+            # No basis for this name — legacy EMA-only gate.
             trims.append(
                 f"  SN{s.subnet_id} {s.name} — +{s.pct_from_ema * 100:.0f}% over EMA, trim into strength"
             )
