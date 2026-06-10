@@ -502,6 +502,8 @@ def select_candidates(all_metrics, holdings, watchlist, budget: int) -> list[int
     forced: list[int] = []
     seen: set[int] = set()
     for nid in list(holdings) + list(watchlist):
+        if nid == 0:           # SN0 Root: dust, always price-filtered, and skipped
+            continue           # by the fetchers — don't spend an enrichment slot on it
         if nid not in seen:
             forced.append(nid)
             seen.add(nid)
