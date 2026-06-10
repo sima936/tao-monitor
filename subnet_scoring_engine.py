@@ -1259,8 +1259,17 @@ def to_json(result) -> str:
     """Serialize full scoring result to JSON for dashboard/API."""
     from dataclasses import asdict
     import json
+    macro = result.macro
     data = {
         "timestamp": result.timestamp,
+        "macro": {
+            "regime": macro.regime.value if (macro and macro.available) else "Unknown",
+            "signal": round(macro.signal, 4) if macro else 0.0,
+            "bull_prob": round(macro.bull_prob, 4) if macro else None,
+            "bear_prob": round(macro.bear_prob, 4) if macro else None,
+            "strategy_mode": macro.strategy_mode if macro else "",
+            "available": bool(macro.available) if macro else False,
+        },
         "summary": {
             "total_subnets": result.total_subnets,
             "passed_filters": result.passed_filters,
