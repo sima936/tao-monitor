@@ -78,13 +78,26 @@ DEFAULT_COLDKEY = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
 class TaostatsClient:
     """Thin wrapper around the Taostats API with rate limiting."""
 
-    def __init__(self, api_key: str, rate_limit_delay: float = 12.5):
+    def __init__(self, api_key: str, rate_limit_delay: float = 12.5,
+                 max_retries: int = 1, backoff_base: float = 3.0,
+                 connect_timeout: float = 8.0, read_timeout: float = 25.0):
         """
         api_key: Your taostats API key (format: tao-xxxxx:yyyyyy)
         rate_limit_delay: Seconds between calls (12.5s = ~5/min for free tier)
+        max_retries: Extra attempts after the first on TRANSIENT failures only
+            (read/connect timeout, 429, 5xx). Default 1 (→ 2 attempts total) so
+            a single blip recovers without endangering the 60s /status budget.
+            Retries fire only on failure — the happy path is unchanged.
+        backoff_base: Base seconds for exponential backoff between retries.
+        connect_timeout / read_timeout: split (connect, read) timeouts. The read
+            timeout is the one that bites on Taostats; 25s leaves headroom for a
+            retry under the /status budget.
         """
         self.api_key = api_key
         self.rate_limit_delay = rate_limit_delay
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.timeout = (connect_timeout, read_timeout)
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": api_key,
@@ -99,21 +112,82 @@ class TaostatsClient:
             time.sleep(self.rate_limit_delay - elapsed)
         self._last_call_time = time.time()
 
+    def _backoff(self, attempt: int, retry_after=None, rate_limited: bool = False) -> float:
+        """Seconds to wait before the next attempt.
+
+        Honours a server Retry-After when present. For 429s the floor is the
+        rate-limit delay (retrying faster would just 429 again); other transient
+        errors use the short exponential base.
+        """
+        if retry_after:
+            try:
+                return max(self.backoff_base, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        base = self.rate_limit_delay if rate_limited else self.backoff_base
+        return base * (2 ** (attempt - 1))
+
     def get(self, endpoint: str, params: Optional[dict] = None) -> dict:
-        """Make a GET request with rate limiting and error handling."""
+        """GET with rate limiting and transient-failure retry.
+
+        Retries ONLY on read/connect timeouts, HTTP 429, and 5xx — these are
+        the blips that abort an otherwise-fine cron run. 4xx (bad params, auth)
+        fail fast, no retry. Rate limiting is enforced once up front; retry
+        spacing comes from the backoff, so we don't double-pay the 12.5s gate.
+        """
         self._rate_limit()
         url = f"{BASE_URL}{endpoint}"
+        last_exc: Optional[Exception] = None
 
-        try:
-            resp = self.session.get(url, params=params, timeout=30)
-            resp.raise_for_status()
+        for attempt in range(1, self.max_retries + 2):  # 1 + max_retries attempts
+            # --- network layer: timeouts / connection errors are transient ---
+            try:
+                resp = self.session.get(url, params=params, timeout=self.timeout)
+            except (requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                if attempt <= self.max_retries:
+                    wait = self._backoff(attempt)
+                    logger.warning(
+                        f"{type(e).__name__} on {url} "
+                        f"(attempt {attempt}/{self.max_retries + 1}); retry in {wait:.0f}s"
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error(f"Request failed for {url} after {attempt} attempts: {e}")
+                raise
+
+            # --- HTTP layer: 429 + 5xx are transient, everything else is final ---
+            status = resp.status_code
+            if status == 429 or 500 <= status < 600:
+                last_exc = requests.exceptions.HTTPError(f"HTTP {status} for {url}")
+                if attempt <= self.max_retries:
+                    wait = self._backoff(
+                        attempt,
+                        retry_after=resp.headers.get("Retry-After"),
+                        rate_limited=(status == 429),
+                    )
+                    logger.warning(
+                        f"HTTP {status} on {url} "
+                        f"(attempt {attempt}/{self.max_retries + 1}); retry in {wait:.0f}s"
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error(f"HTTP {status} for {url} after {attempt} attempts")
+                resp.raise_for_status()
+
+            # 2xx success, or a deterministic 4xx → fail fast.
+            try:
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"HTTP error {status} for {url}: {e}")
+                raise
             return resp.json()
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error {resp.status_code} for {url}: {e}")
-            raise
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed for {url}: {e}")
-            raise
+
+        # Loop exhausted (defensive — the raises above normally return/raise first).
+        if last_exc:
+            raise last_exc
+        raise requests.exceptions.RequestException(f"Exhausted retries for {url}")
 
     def get_all_pools(self) -> list[dict]:
         """Fetch pool data for ALL subnets in one call."""
