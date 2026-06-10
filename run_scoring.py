@@ -252,17 +252,16 @@ def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int]) -> dict 
         except (TypeError, ValueError):
             return None
 
+    # balance_as_tao is an integer rao string — divide by 1e9 to get TAO,
+    # matching the dashboard's parse in gordie.html.
     bal_by_netuid: dict[int, float] = {}
     for entry in stakes:
         nid = entry.get("netuid", entry.get("subnet_id"))
         if nid is None:
             continue
-        bal = entry.get("balance_as_tao")
-        if bal is None:
-            bal = entry.get("balance", entry.get("stake_as_tao"))
-        bal = _f(bal)
+        bal = _f(entry.get("balance_as_tao"))
         if bal is not None:
-            bal_by_netuid[int(nid)] = bal
+            bal_by_netuid[int(nid)] = bal / 1e9
 
     pnl: dict[int, float] = {}
     for h in holdings:
