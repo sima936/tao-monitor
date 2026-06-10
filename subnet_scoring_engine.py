@@ -366,12 +366,12 @@ def p4_score_pullback(prices: np.ndarray, pct_from_ema: float) -> tuple[float, f
     >35% off high → low score (potentially broken).
     """
     if len(prices) < 10:
-        return 50.0, 0.0
+        return 50.0, None
     window = prices[-30:] if len(prices) >= 30 else prices
     recent_high = float(np.max(window))
     current = prices[-1]
     if recent_high == 0:
-        return 50.0, 0.0
+        return 50.0, None
     pct_off = (current - recent_high) / recent_high   # negative = below high
 
     depth = abs(pct_off)
@@ -611,7 +611,7 @@ def detect_take_profit(pct_from_ema: float, pct_from_high: float, markov_regime:
         flags.append(f"TAKE_PROFIT_STRONG — {pct_from_ema:.0%} above EMA, consider full trim")
     elif pct_from_ema >= TP_WARN_PCT:
         flags.append(f"TAKE_PROFIT — {pct_from_ema:.0%} above EMA, consider partial trim")
-    if abs(pct_from_high) < 0.03:
+    if pct_from_high is not None and abs(pct_from_high) < 0.03:
         flags.append("AT_RECENT_HIGH — price at peak, good exit zone")
     if markov_regime == "Bear" and pct_from_ema > 0.05:
         flags.append("REGIME_BEAR_WHILE_EXTENDED — trim before decline accelerates")
@@ -779,7 +779,7 @@ def score_subnet(
         markov_persistence=round(markov_persist, 3),
         markov_available=markov_available,
         pct_from_ema=round(pct_from_ema, 4),
-        pct_from_recent_high=round(pct_from_high, 4),
+        pct_from_recent_high=round(pct_from_high, 4) if pct_from_high is not None else None,
         ema_slope_pct=round(ema_slope, 4),
         pool_depth_trending=pool_dir,
         relative_perf_vs_tao=round(s_p10 / 50.0 - 1.0, 4),  # store as actual alpha
