@@ -443,6 +443,11 @@ footer {
         <div class="card-value green" id="port-count">—</div>
         <div class="card-sub">active subnets</div>
       </div>
+      <div class="card">
+        <div class="card-label">Total P&amp;L (τ)</div>
+        <div class="card-value" id="port-total-pnl">—</div>
+        <div class="card-sub" id="port-total-pnl-pct">vs cost basis</div>
+      </div>
     </div>
     <div class="section-title">Staked Positions <span class="badge" id="port-badge">loading...</span></div>
     <table>
@@ -450,14 +455,17 @@ footer {
         <tr>
           <th>Subnet</th>
           <th>Staked (τ)</th>
+          <th>Cost (τ)</th>
+          <th>P&amp;L (τ)</th>
+          <th>P&amp;L %</th>
           <th>Value (£)</th>
-          <th>Allocation</th>
-          <th>Target</th>
-          <th>Drift</th>
+          <th class="hide-mobile">Allocation</th>
+          <th class="hide-mobile">Target</th>
+          <th class="hide-mobile">Drift</th>
         </tr>
       </thead>
       <tbody id="portfolio-body">
-        <tr><td colspan="6" class="loading"><span class="spinner"></span>Fetching from chain...</td></tr>
+        <tr><td colspan="9" class="loading"><span class="spinner"></span>Fetching from chain...</td></tr>
       </tbody>
     </table>
     <div class="section-title" style="margin-top:1.5rem">Allocation Chart</div>
@@ -963,6 +971,17 @@ function renderFilterBreakdown(results) {
 }
 
 // ── Portfolio Data ──────────────────────────────────────────────────────────
+// Auto cost-basis, computed by the cron from on-chain stake events and pushed
+// to serve.py's in-memory store. Same-origin (Basic Auth resends). Returns
+// {positions:{netuid:{tao_invested,...}}} or {status,positions:{}} pre-first-run.
+async function fetchCostBasis() {
+  try {
+    const r = await fetch('/api/cost-basis', { cache: 'no-store' });
+    if (!r.ok) return {};
+    return await r.json();
+  } catch (e) { return {}; }
+}
+
 async function fetchPortfolioStakes() {
   const r = await fetch('/api/portfolio/stakes');
   if (!r.ok) throw new Error('Portfolio fetch failed');
@@ -973,9 +992,11 @@ function resolveSubnetName(netuid, nameByNetuid) {
   return (nameByNetuid && nameByNetuid[netuid]) || SUBNET_NAME_FALLBACK[netuid] || ('SN' + netuid);
 }
 
-function renderPortfolio(stakeData, priceData, nameByNetuid) {
+function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis) {
   const tbody = document.getElementById('portfolio-body');
   const gbp = priceData.bittensor?.gbp || 0;
+  const cbPos = (costBasis && costBasis.positions) || {};
+
   const positions = (stakeData.data || [])
     .filter(s => {
       const tao = parseInt(s.balance_as_tao || '0') / 1e9;
@@ -991,10 +1012,40 @@ function renderPortfolio(stakeData, priceData, nameByNetuid) {
   const totalTao = positions.reduce((sum, p) => sum + p.tao, 0);
   const totalGbp = totalTao * gbp;
 
+  // Totals only over positions with a known cost basis, so the % is fair.
+  let totalInvested = 0, totalValueWithCost = 0;
+  positions.forEach(p => {
+    const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
+    const inv = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
+    if (inv != null && inv > 0) { totalInvested += inv; totalValueWithCost += p.tao; }
+  });
+  const totalPnl = totalInvested > 0 ? (totalValueWithCost - totalInvested) : null;
+  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
+
   document.getElementById('port-total-tao').textContent = totalTao.toFixed(2) + 'τ';
   document.getElementById('port-total-gbp').textContent = '£' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
   document.getElementById('port-count').textContent = positions.length;
   document.getElementById('port-badge').textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
+
+  const pnlEl = document.getElementById('port-total-pnl');
+  const pnlPctEl = document.getElementById('port-total-pnl-pct');
+  if (totalPnl != null) {
+    const cls = totalPnl > 0 ? 'green' : totalPnl < 0 ? 'red' : 'gold';
+    pnlEl.className = 'card-value ' + cls;
+    pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(2) + 'τ';
+    pnlPctEl.textContent = (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(1) + '% vs cost (priced positions)';
+  } else {
+    pnlEl.className = 'card-value';
+    pnlEl.textContent = '—';
+    pnlPctEl.textContent = 'awaiting cost-basis run (cron)';
+  }
+
+  // Per-position P&L cell (TAO), colour-coded; '—' if no basis set.
+  const pnlTauCell = (pnl) => {
+    if (pnl == null) return '<span class="pct-neutral">—</span>';
+    const cls = pnl > 0 ? 'pct-positive' : pnl < 0 ? 'pct-negative' : 'pct-neutral';
+    return `<span class="${cls}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}</span>`;
+  };
 
   const colors = ['#00d4ff','#00ff88','#00d4ff','var(--accent2)','#a855f7','#f43f5e','#14b8a6','#eab308','#6366f1'];
 
@@ -1009,13 +1060,21 @@ function renderPortfolio(stakeData, priceData, nameByNetuid) {
     const driftStr = drift >= 0 ? '+' + drift.toFixed(1) + '%' : drift.toFixed(1) + '%';
     const color = colors[i % colors.length];
 
+    const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
+    const invested = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
+    const pnl = invested != null ? (p.tao - invested) : null;
+    const pnlPct = (invested != null && invested > 0) ? (pnl / invested) * 100 : null;
+
     html += `<tr>
       <td><strong>SN${p.netuid}</strong> ${p.name}</td>
       <td>${p.tao.toFixed(4)}</td>
+      <td>${invested != null ? invested.toFixed(4) : '—'}</td>
+      <td>${pnlTauCell(pnl)}</td>
+      <td>${pnlPct != null ? pctCell(pnlPct) : '<span class="pct-neutral">—</span>'}</td>
       <td>£${valGbp.toFixed(2)}</td>
-      <td>${actualPct.toFixed(1)}%</td>
-      <td>${targetPct > 0 ? targetPct + '%' : '—'}</td>
-      <td class="${driftCls}">${targetPct > 0 ? driftStr : '—'}</td>
+      <td class="hide-mobile">${actualPct.toFixed(1)}%</td>
+      <td class="hide-mobile">${targetPct > 0 ? targetPct + '%' : '—'}</td>
+      <td class="hide-mobile ${driftCls}">${targetPct > 0 ? driftStr : '—'}</td>
     </tr>`;
 
     allocHtml += `<div class="alloc-bar-row">
@@ -1032,11 +1091,14 @@ function renderPortfolio(stakeData, priceData, nameByNetuid) {
   html += `<tr style="border-top:1px solid var(--border);font-weight:600">
     <td>TOTAL</td>
     <td>${totalTao.toFixed(4)}</td>
+    <td>${totalInvested > 0 ? totalInvested.toFixed(4) : '—'}</td>
+    <td>${pnlTauCell(totalPnl)}</td>
+    <td>${totalPnlPct != null ? pctCell(totalPnlPct) : '<span class="pct-neutral">—</span>'}</td>
     <td>£${totalGbp.toFixed(2)}</td>
-    <td>100%</td><td></td><td></td>
+    <td class="hide-mobile">100%</td><td class="hide-mobile"></td><td class="hide-mobile"></td>
   </tr>`;
 
-  tbody.innerHTML = html || '<tr><td colspan="6" style="color:var(--muted);text-align:center">No positions found</td></tr>';
+  tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center">No positions found</td></tr>';
   document.getElementById('alloc-chart').innerHTML = allocHtml;
 }
 
@@ -1058,8 +1120,8 @@ async function loadData() {
     });
 
     // Portfolio — fetch in parallel, don't block scanner if it fails
-    fetchPortfolioStakes().then(stakeData => {
-      renderPortfolio(stakeData, priceData, nameByNetuid);
+    Promise.all([fetchPortfolioStakes(), fetchCostBasis()]).then(([stakeData, costBasis]) => {
+      renderPortfolio(stakeData, priceData, nameByNetuid, costBasis);
     }).catch(err => {
       console.warn('Portfolio fetch failed:', err);
       document.getElementById('portfolio-body').innerHTML =
