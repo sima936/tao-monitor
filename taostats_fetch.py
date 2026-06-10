@@ -69,6 +69,7 @@ POOL_HISTORY = "/api/dtao/pool/history/v1"
 METAGRAPH_LATEST = "/api/metagraph/latest/v1"
 SUBNET_INFO = "/api/dtao/subnet/latest/v1"
 STAKE_BALANCE = "/api/dtao/stake_balance/latest/v1"
+DELEGATION = "/api/delegation/v1"   # staking/delegation events (buys & sells)
 
 # Default wallet — Simon's coldkey
 DEFAULT_COLDKEY = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
@@ -149,6 +150,27 @@ class TaostatsClient:
         data = self.get(STAKE_BALANCE, params={"coldkey": coldkey, "limit": 100})
         return data.get("data", [])
 
+    def get_delegation_events(
+        self,
+        nominator: str = DEFAULT_COLDKEY,
+        page: int = 1,
+        limit: int = 200,
+        order: str = "timestamp_asc",
+    ) -> dict:
+        """One page of staking/delegation events (buys & sells) for a coldkey.
+
+        Endpoint: GET /api/delegation/v1?nominator={coldkey}
+        Each event: action DELEGATE|UNDELEGATE, amount (TAO leg, rao),
+        alpha (rao), alpha_price_in_tao, netuid, is_transfer.
+        Returns the full payload {pagination:{...}, data:[...]}.
+        """
+        return self.get(DELEGATION, params={
+            "nominator": nominator,
+            "page": page,
+            "limit": limit,
+            "order": order,
+        })
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dynamic holdings from chain
@@ -179,6 +201,126 @@ def fetch_wallet_holdings(
     except Exception as e:
         logger.error(f"Failed to fetch wallet holdings: {e}")
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cost basis from on-chain stake events (auto — replaces manual entry)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_cost_basis(
+    api_key: str,
+    coldkey: str = DEFAULT_COLDKEY,
+    max_pages: int = 25,
+    rate_limit_delay: float = 12.5,
+) -> dict:
+    """Compute per-subnet cost basis from the coldkey's full stake-event history.
+
+    Method (TAO-denominated, no accounting-method ambiguity):
+        net_invested[netuid] = Σ TAO in (DELEGATE) − Σ TAO out (UNDELEGATE)
+
+    P&L is then (current balance_as_tao − net_invested), computed downstream.
+    This auto-handles staking rewards correctly: emission alpha is not a
+    DELEGATE event, so it shows up as extra value at zero cost.
+
+    Pages /api/delegation/v1 oldest→newest until exhausted (or max_pages hit),
+    bucketing by netuid. One coldkey's whole history, so it's a few calls, not
+    one-per-subnet. Returns a dashboard-ready dict:
+
+        {
+          "positions": { "<netuid>": {
+              "tao_invested": float,   # net TAO in (may be <=0 = house money)
+              "tao_in": float, "tao_out": float,
+              "n_events": int, "transfers": int
+          }, ... },
+          "_source": "taostats_delegation",
+          "_computed": iso8601,
+          "_coldkey": coldkey,
+          "_pages": int,
+          "_capped": bool,           # True if max_pages hit before history end
+          "_total_events": int
+        }
+
+    `amount` is the TAO leg in rao (÷1e9). Fees (sub-milliTAO) are ignored.
+    Transfer events (is_transfer truthy) are counted but also tallied separately
+    so the dashboard can flag positions whose basis may be incomplete.
+    """
+    client = TaostatsClient(api_key=api_key, rate_limit_delay=rate_limit_delay)
+
+    buckets: dict[int, dict] = {}
+    pages = 0
+    capped = False
+    total_events = 0
+
+    page = 1
+    while page <= max_pages:
+        try:
+            payload = client.get_delegation_events(coldkey, page=page, limit=200)
+        except Exception as e:
+            logger.warning(f"Cost-basis: delegation page {page} failed: {e}")
+            break
+
+        pages += 1
+        events = payload.get("data", []) or []
+        for ev in events:
+            total_events += 1
+            netuid = ev.get("netuid")
+            if netuid is None:
+                continue
+            netuid = int(netuid)
+            b = buckets.setdefault(
+                netuid,
+                {"tao_in": 0.0, "tao_out": 0.0, "n_events": 0, "transfers": 0},
+            )
+            try:
+                tao = float(ev.get("amount", 0) or 0) / 1e9
+            except (TypeError, ValueError):
+                tao = 0.0
+            action = str(ev.get("action", "")).upper()
+            if action == "DELEGATE":
+                b["tao_in"] += tao
+            elif action == "UNDELEGATE":
+                b["tao_out"] += tao
+            else:
+                # Unknown action — skip the amount but record it happened.
+                pass
+            b["n_events"] += 1
+            if ev.get("is_transfer"):
+                b["transfers"] += 1
+
+        pag = payload.get("pagination", {}) or {}
+        next_page = pag.get("next_page")
+        if not next_page:
+            break
+        page = int(next_page)
+    else:
+        # Loop exhausted max_pages without a natural break → history truncated.
+        capped = True
+
+    positions = {}
+    for netuid, b in buckets.items():
+        positions[str(netuid)] = {
+            "tao_invested": round(b["tao_in"] - b["tao_out"], 6),
+            "tao_in": round(b["tao_in"], 6),
+            "tao_out": round(b["tao_out"], 6),
+            "n_events": b["n_events"],
+            "transfers": b["transfers"],
+        }
+
+    logger.info(
+        f"Cost basis: {len(positions)} subnets from {total_events} events "
+        f"over {pages} page(s){' (CAPPED)' if capped else ''}"
+    )
+
+    from datetime import datetime, timezone
+    return {
+        "positions": positions,
+        "_source": "taostats_delegation",
+        "_computed": datetime.now(timezone.utc).isoformat(),
+        "_coldkey": coldkey,
+        "_pages": pages,
+        "_capped": capped,
+        "_total_events": total_events,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
