@@ -581,22 +581,19 @@ footer {
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
 const HOLDINGS = {
+  0:   {name: 'Root'},
   4:   {name: 'Targon'},
-  5:   {name: 'Hone'},
   9:   {name: 'Iota'},
-  32:  {name: 'ItsAI'},
   44:  {name: 'Score'},
+  46:  {name: 'Zipcode'},
   55:  {name: 'NIOME'},
   68:  {name: 'NOVA'},
-  75:  {name: 'Hippius'},
+  107: {name: 'Minos'},
   123: {name: 'MANTIS'},
 };
 
 const WATCHLIST = {
-  3:'Templar', 2:'D-Sperse', 13:'Data Universe', 18:'Zeus',
-  33:'Ready AI', 34:'Bitmind',
-  46:'RESI', 50:'Synth', 56:'Gradients', 85:'Vidaio',
-  93:'Bitcast', 21:'AdTao'
+  3:'Teutonic'
 };
 
 // Subnet display names — fallback only when the live pools feed lacks a netuid
@@ -625,9 +622,13 @@ const FILTERS = {
 
   
 
-// Portfolio target allocations (% of total)
+// Portfolio target allocations (% of total). Held-only keys.
+// Dropped stale non-held 5/32/75. SN0 is dust (house money) → 0%.
+// TODO: assign intended weights for 46 (Zipcode) and 107 (Minos) — left 0
+// until Simon sets the split; missing keys render as 0% via `|| 0`.
 const TARGETS = {
-  9: 16, 68: 14, 44: 12, 5: 11, 55: 11, 4: 11, 123: 9, 75: 9, 32: 7
+  9: 16, 68: 14, 44: 12, 55: 11, 4: 11, 123: 9,
+  0: 0, 46: 0, 107: 0
 };
 
 // ── State ───────────────────────────────────────────────────────────────────
