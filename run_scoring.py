@@ -387,6 +387,60 @@ def apply_history_overrides(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Candidate set for real-data enrichment (free-tier API budget)
+# ─────────────────────────────────────────────────────────────────────────────
+
+WATCHLIST = [3]            # SN3 Teutonic — always enriched even if not held
+CANDIDATE_BUDGET = 25      # default max subnets to pull real history/Gini for
+CAND_MIN_POOL = 50.0       # TAO — skip illiquid pools when picking candidates
+CAND_MAX_PRICE = 0.10      # TAO — skip very expensive tokens when picking candidates
+
+
+def _recent_7d_change(m) -> float:
+    """Real 7d move from the (anchored) price series; -inf if unknown.
+
+    The synthetic series is reconstructed from the real 1d/7d anchors, so its
+    own 7d change == the real one — a legitimate ranking signal with no extra
+    API call.
+    """
+    ph = getattr(m, "price_history", None) or []
+    if len(ph) >= 8 and ph[-8]:
+        return (ph[-1] - ph[-8]) / ph[-8]
+    if len(ph) >= 2 and ph[0]:
+        return (ph[-1] - ph[0]) / ph[0]
+    return float("-inf")
+
+
+def select_candidates(all_metrics, holdings, watchlist, budget: int) -> list[int]:
+    """Bounded set of subnets worth spending real-data budget on.
+
+    Always includes current holdings + watchlist (need real exit/health
+    signal), then fills the remaining budget with the strongest 7d movers
+    among adequately-liquid, sanely-priced pools. Uses only fields already in
+    hand — no extra API calls. SN0 is skipped by the fetchers downstream.
+    """
+    forced: list[int] = []
+    seen: set[int] = set()
+    for nid in list(holdings) + list(watchlist):
+        if nid not in seen:
+            forced.append(nid)
+            seen.add(nid)
+
+    pool = [
+        m for m in all_metrics
+        if m.subnet_id not in seen
+        and m.subnet_id != 0
+        and m.pool_depth >= CAND_MIN_POOL
+        and m.token_price <= CAND_MAX_PRICE
+        and "deprecated" not in (m.name or "").lower()
+    ]
+    pool.sort(key=_recent_7d_change, reverse=True)
+
+    remaining = max(0, budget - len(forced))
+    return forced + [m.subnet_id for m in pool[:remaining]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAO macro regime (from tao_price_history.json written by a separate fetcher)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -524,6 +578,7 @@ def run(
     force_send: bool = False,
     holdings_gini: bool = False,
     holdings_history: bool = False,
+    candidate_budget: int = 0,
 ) -> dict:
     if holdings is None:
         holdings = CURRENT_HOLDINGS
@@ -534,12 +589,10 @@ def run(
     # Load previous state for change detection
     prev_state = load_state()
 
-    # Gini: prefer the SDK-written disk cache (Infinity8 co-located runs);
-    # on Railway that cache is unreachable, so optionally fetch holdings Gini
-    # in-process. holdings_gini is opt-in (cron only) — never on /status.
+    # Gini: prefer the SDK-written disk cache (Infinity8 co-located runs); on
+    # Railway that cache is unreachable, so we optionally fetch Gini in-process
+    # for the enrichment target set below. Opt-in (cron only) — never on /status.
     gini_cache = load_gini_cache()
-    if not gini_cache and holdings_gini:
-        gini_cache = fetch_holdings_gini(holdings, api_key)
 
     # Load TAO macro signal — inline compute first, file fallback, then Unknown
     macro = compute_tao_macro_inline() or load_tao_macro_signal()
@@ -560,13 +613,29 @@ def run(
 
     logger.info(f"Fetched {len(all_metrics)} subnet metrics")
 
-    # Apply real Gini scores where available
+    # Apply the disk Gini cache first (Infinity8 path), where available.
     all_metrics = apply_gini_overrides(all_metrics, gini_cache)
 
-    # Replace synthetic 9-bar history with real daily bars for holdings (opt-in,
-    # cron only — adds ~12.5s/holding; never on the 60s /status path).
+    # Bounded enrichment target set (free-tier API budget). candidate_budget == 0
+    # keeps the original holdings-only behaviour; > 0 broadens to holdings +
+    # watchlist + the strongest 7d movers among liquid, sanely-priced pools.
+    if candidate_budget > 0:
+        targets = select_candidates(all_metrics, holdings, WATCHLIST, candidate_budget)
+        logger.info(f"Enrichment targets ({len(targets)}): {targets}")
+    else:
+        targets = list(holdings)
+
+    # Real Gini for the target set, in-process (Railway path), only if the disk
+    # cache didn't already supply it. Opt-in, cron only — ~12.5s/subnet.
+    if holdings_gini and not gini_cache:
+        all_metrics = apply_gini_overrides(
+            all_metrics, fetch_holdings_gini(targets, api_key)
+        )
+
+    # Replace synthetic 9-bar history with real daily bars for the target set
+    # (opt-in, cron only — adds ~12.5s/subnet; never on the 60s /status path).
     if holdings_history:
-        history = fetch_holdings_history(client, holdings)
+        history = fetch_holdings_history(client, targets)
         all_metrics = apply_history_overrides(all_metrics, history)
 
     # Convert macro dict → TaoMacroState for scoring engine
@@ -654,6 +723,11 @@ def main():
     parser.add_argument("--holdings-history", action="store_true",
                         help="Fetch real daily price history for holdings (cron only — "
                              "adds ~100s; replaces synthetic bars; not on /status)")
+    parser.add_argument("--candidates", type=int, default=0, metavar="N",
+                        help="Enrich N subnets (holdings + watchlist + top 7d movers) "
+                             "with real history/Gini instead of holdings only. "
+                             "0 = holdings only (default). Free-tier safe: ~15-25; "
+                             "each adds ~12.5s. Combine with --holdings-history/-gini.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -690,6 +764,7 @@ def main():
         force_send=args.force_send,
         holdings_gini=args.holdings_gini,
         holdings_history=args.holdings_history,
+        candidate_budget=args.candidates,
     )
 
     if "error" in result:
