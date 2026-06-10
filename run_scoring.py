@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics
+from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis
 from subnet_scoring_engine import (
     run_scoring_cycle,
     format_telegram_alert,
@@ -199,6 +199,31 @@ def push_score_to_dashboard(result_json: str) -> None:
         logger.info(f"Dashboard ingest: HTTP {resp.status_code}")
     except Exception as e:
         logger.warning(f"Dashboard ingest failed: {e}")
+
+
+def push_cost_basis_to_dashboard(cost_basis_json: str) -> None:
+    """POST computed cost-basis JSON to serve.py's in-memory store.
+
+    Derives the cost-basis ingest URL from DASHBOARD_INGEST_URL by swapping the
+    path segment (ingest-score → ingest-cost-basis), reusing the same token.
+    No-op unless DASHBOARD_INGEST_URL and SCORE_INGEST_TOKEN are both set.
+    """
+    score_url = os.environ.get('DASHBOARD_INGEST_URL', '').strip()
+    token = os.environ.get('SCORE_INGEST_TOKEN', '').strip()
+    if not score_url or not token:
+        logger.info("Cost-basis ingest skipped (DASHBOARD_INGEST_URL / SCORE_INGEST_TOKEN unset)")
+        return
+    url = score_url.replace('ingest-score', 'ingest-cost-basis')
+    try:
+        resp = requests.post(
+            url,
+            data=cost_basis_json.encode('utf-8'),
+            headers={'X-Ingest-Token': token, 'Content-Type': 'application/json'},
+            timeout=15,
+        )
+        logger.info(f"Cost-basis ingest: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Cost-basis ingest failed: {e}")
 
 
 def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
@@ -579,6 +604,7 @@ def run(
     holdings_gini: bool = False,
     holdings_history: bool = False,
     candidate_budget: int = 0,
+    cost_basis: bool = False,
 ) -> dict:
     if holdings is None:
         holdings = CURRENT_HOLDINGS
@@ -646,6 +672,17 @@ def run(
 
     # Push the full v4 result to the dashboard's in-memory store (Option 1 bridge)
     push_score_to_dashboard(to_json(result))
+
+    # Auto cost-basis (opt-in, cron only — pages stake-event history, ~12.5s/page).
+    # Computed here on the always-slow cron and pushed to the dashboard, because
+    # serve.py is single-threaded and must never block on a multi-page fetch.
+    if cost_basis:
+        try:
+            cb = fetch_cost_basis(api_key)
+            push_cost_basis_to_dashboard(json.dumps(cb))
+        except Exception as e:
+            logger.warning(f"Cost-basis computation failed (non-fatal): {e}")
+
     elapsed = time.time() - start_time
     logger.info(
         f"Scoring complete: {result.passed_filters} passed, "
@@ -728,6 +765,10 @@ def main():
                              "with real history/Gini instead of holdings only. "
                              "0 = holdings only (default). Free-tier safe: ~15-25; "
                              "each adds ~12.5s. Combine with --holdings-history/-gini.")
+    parser.add_argument("--cost-basis", action="store_true",
+                        help="Compute per-subnet cost basis from on-chain stake "
+                             "events and push to the dashboard (cron only — pages "
+                             "delegation history, ~12.5s/page).")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -765,6 +806,7 @@ def main():
         holdings_gini=args.holdings_gini,
         holdings_history=args.holdings_history,
         candidate_budget=args.candidates,
+        cost_basis=args.cost_basis,
     )
 
     if "error" in result:
