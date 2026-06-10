@@ -50,7 +50,12 @@ import pandas as pd
 SUBNET_WINDOW    = 7       # Markov rolling return window (bars)
 SUBNET_THRESHOLD = 0.10    # ±10% regime boundary
 SUBNET_MIN_TRAIN = 60      # min bars before Markov is reliable
-EMA_PERIOD       = 72      # EMA lookback period
+EMA_PERIOD       = 24      # daily-bar EMA (~1 trading month). Was 72 — that is
+                           # Siam's "72 EMA on 1H" carried onto a DAILY series,
+                           # which anchored the EMA to launch-era prices
+                           # (pct_from_ema clustered at -0.94..-0.998). At 24 the
+                           # launch seed washes out in ~35 bars, so pct_from_ema
+                           # tracks the tactical trend on fast-moving subnets.
 
 # Siam's hard pre-filter thresholds
 # Raised to accommodate real holdings (SN4 ~0.054, SN51 ~0.051, SN64 ~0.10+)
@@ -1071,7 +1076,8 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
         L.append(
             f"  SN{s.subnet_id} {s.name} [{s.health_score:.0f}] "
             f"{dot(s.markov_regime)}{s.markov_regime} "
-            f"{s.token_price:.4f}τ  24h:{pct(s.pct_change_24h)} 7d:{pct(s.pct_change_7d)}  "
+            f"{s.token_price:.4f}τ  24h:{pct(s.pct_change_24h)} 7d:{pct(s.pct_change_7d)} "
+            f"EMA:{pct(s.pct_from_ema)}  "
             f"Gini:{gini_str(s.genie_score_raw)}{conc_tag(s.genie_score_raw)}"
         )
     for h in holdings:
