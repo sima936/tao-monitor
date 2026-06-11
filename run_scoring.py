@@ -55,6 +55,11 @@ from subnet_scoring_engine import (
     TaoMacroState,
     MacroRegime,
 )
+from subnet_allocation import (
+    compute_target_allocation,
+    AllocationPolicy,
+    format_allocation_plan,
+)
 
 logger = logging.getLogger("tao_scoring_runner")
 
@@ -62,8 +67,9 @@ logger = logging.getLogger("tao_scoring_runner")
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Last-resort fallback only. The cron now resolves holdings on-chain via
-# fetch_wallet_holdings(); this list is used only if that call fails.
+# Last-resort fallback only. The cron now resolves holdings on-chain via a
+# single get_wallet_stakes() call in main() (balances reused for P&L + alloc);
+# this list is used only if that call fails.
 # Updated Jun 9 to the real on-chain set (was stale: [0,4,51,62,64,68,75]).
 CURRENT_HOLDINGS = [0, 4, 9, 44, 46, 55, 68, 107, 123]
 TOP_N = 5  # reduced from 10 — keeps alerts shorter
@@ -226,42 +232,54 @@ def push_cost_basis_to_dashboard(cost_basis_json: str) -> None:
         logger.warning(f"Cost-basis ingest failed: {e}")
 
 
-def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int]) -> dict | None:
+def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
+    """netuid → balance in TAO from get_wallet_stakes() entries.
+
+    balance_as_tao is an integer rao string → /1e9 (matches gordie.html's parse).
+    One source of truth so holdings-resolution, the P&L gate, and the allocator
+    all consume a SINGLE get_wallet_stakes fetch (LIVE_STATE #5 de-dup).
+    """
+    out: dict[int, float] = {}
+    for entry in stakes or []:
+        nid = entry.get("netuid", entry.get("subnet_id"))
+        if nid is None:
+            continue
+        try:
+            bal = float(entry.get("balance_as_tao"))
+        except (TypeError, ValueError):
+            continue
+        out[int(nid)] = bal / 1e9
+    return out
+
+
+def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int],
+                         bal_by_netuid: dict[int, float] | None = None) -> dict | None:
     """Map each held netuid → realised+unrealised P&L fraction vs net-invested.
 
         pnl[netuid] = (current balance_as_tao − net_invested) / net_invested
 
-    net_invested comes from the cost-basis dict (fetch_cost_basis); current
-    balance comes from one stake_balance call (the same endpoint used for
-    holdings resolution). House-money / zero-basis positions (net_invested <= 0,
-    e.g. SN0 Root) are skipped — P&L% is undefined there. Returns None on a
-    fetch failure so the Telegram formatter cleanly falls back to its EMA gate.
+    net_invested comes from the cost-basis dict (fetch_cost_basis). Current
+    balances are reused from `bal_by_netuid` when supplied (no extra call —
+    threaded from the cycle's single get_wallet_stakes); otherwise fetched here.
+    House-money / zero-basis positions (net_invested <= 0, e.g. SN0 Root) are
+    skipped — P&L% is undefined there. Returns None on a fetch failure so the
+    Telegram formatter cleanly falls back to its EMA gate.
     """
     positions = (cost_basis or {}).get("positions", {})
     if not positions:
         return None
-    try:
-        stakes = client.get_wallet_stakes()
-    except Exception as e:
-        logger.warning(f"P&L gate: stake-balance fetch failed (non-fatal): {e}")
-        return None
+    if bal_by_netuid is None:
+        try:
+            bal_by_netuid = parse_stake_balances(client.get_wallet_stakes())
+        except Exception as e:
+            logger.warning(f"P&L gate: stake-balance fetch failed (non-fatal): {e}")
+            return None
 
     def _f(v):
         try:
             return float(v)
         except (TypeError, ValueError):
             return None
-
-    # balance_as_tao is an integer rao string — divide by 1e9 to get TAO,
-    # matching the dashboard's parse in gordie.html.
-    bal_by_netuid: dict[int, float] = {}
-    for entry in stakes:
-        nid = entry.get("netuid", entry.get("subnet_id"))
-        if nid is None:
-            continue
-        bal = _f(entry.get("balance_as_tao"))
-        if bal is not None:
-            bal_by_netuid[int(nid)] = bal / 1e9
 
     pnl: dict[int, float] = {}
     for h in holdings:
@@ -662,6 +680,7 @@ def run(
     holdings_history: bool = False,
     candidate_budget: int = 0,
     cost_basis: bool = False,
+    prefetched_balances: dict[int, float] | None = None,
 ) -> dict:
     if holdings is None:
         holdings = CURRENT_HOLDINGS
@@ -727,21 +746,49 @@ def run(
     # Score — pass pre-computed macro so scoring engine doesn't recompute with empty data
     result = run_scoring_cycle(all_metrics, top_n=top_n, macro=macro_state)
 
-    # Push the full v4 result to the dashboard's in-memory store (Option 1 bridge)
-    push_score_to_dashboard(to_json(result))
-
     # Auto cost-basis (opt-in, cron only — pages stake-event history, ~12.5s/page).
     # Computed here on the always-slow cron and pushed to the dashboard, because
     # serve.py is single-threaded and must never block on a multi-page fetch.
     # Also yields the real P&L gate for the Telegram trim section.
     pnl_by_netuid = None
+    bal_by_netuid = prefetched_balances        # threaded from main's on-chain holdings resolve
     if cost_basis:
         try:
             cb = fetch_cost_basis(api_key)
             push_cost_basis_to_dashboard(json.dumps(cb))
-            pnl_by_netuid = compute_holdings_pnl(client, cb, holdings)
+            if bal_by_netuid is None:           # only fetch if main didn't already (#5 de-dup)
+                bal_by_netuid = parse_stake_balances(client.get_wallet_stakes())
+            pnl_by_netuid = compute_holdings_pnl(client, cb, holdings, bal_by_netuid=bal_by_netuid)
         except Exception as e:
             logger.warning(f"Cost-basis computation failed (non-fatal): {e}")
+
+    # ── Allocation layer ("be Siam"): score → size. Targets always compute;
+    # Drift + per-name actions only when balances are known (cron / threaded). ─
+    account_tao = sum(bal_by_netuid.values()) if bal_by_netuid else None
+    current_weight_by_id = (
+        {sid: b / account_tao for sid, b in bal_by_netuid.items()}
+        if (bal_by_netuid and account_tao) else None
+    )
+    plan = compute_target_allocation(
+        result.ranked_by_health,                # pre-filter survivors, sized off health_score
+        result.macro,
+        account_tao=account_tao,
+        current_weight_by_id=current_weight_by_id,
+    )
+    logger.info(
+        f"Allocation: deploy {plan.deployed_fraction:.0%} · "
+        f"{len(plan.positions)} green · {len(plan.cut)} cut · SN0 {plan.sn0_target_weight:.0%}"
+    )
+
+    # Build the dashboard/JSON payload (v4 score + allocation block) and push it.
+    try:
+        _payload = json.loads(to_json(result))
+        _payload["allocation"] = plan.to_dict()
+        payload_json = json.dumps(_payload)
+    except Exception as e:
+        logger.warning(f"Allocation embed failed (non-fatal): {e}")
+        payload_json = to_json(result)
+    push_score_to_dashboard(payload_json)
 
     elapsed = time.time() - start_time
     logger.info(
@@ -751,13 +798,15 @@ def run(
 
     # JSON output path — no Telegram logic
     if output_json:
-        print(to_json(result))
+        print(payload_json)
         return {"timestamp": result.timestamp, "passed": result.passed_filters}
 
     # Build message
     macro_header = format_macro_header(macro)
     msg = format_telegram_alert(result, current_holdings=holdings, macro_header=macro_header,
                                 pnl_by_netuid=pnl_by_netuid)
+    if cost_basis:   # cron digest only — keep the 60s /status path lean (no alloc block)
+        msg += "\n\n" + format_allocation_plan(plan, account_tao=account_tao)
     print(msg)
 
     # Change detection — decide whether to send
@@ -843,14 +892,19 @@ def main():
         print("ERROR: TAOSTATS_API_KEY required.", file=sys.stderr)
         sys.exit(1)
 
+    prefetched_balances = None
     if args.holdings:
         holdings = [int(x.strip()) for x in args.holdings.split(",")]
     else:
-        # No explicit holdings (bare cron) — resolve on-chain so the report
-        # never drifts from /status. Fall back to the constant only on failure.
+        # No explicit holdings (bare cron) — resolve on-chain so the report never
+        # drifts from /status. Capture balances from the SAME call so the P&L gate
+        # and the allocator reuse them (one get_wallet_stakes per cycle; #5 de-dup).
         try:
-            from taostats_fetch import fetch_wallet_holdings
-            holdings = fetch_wallet_holdings(args.api_key) or CURRENT_HOLDINGS
+            from taostats_fetch import TaostatsClient
+            _c = TaostatsClient(api_key=args.api_key, rate_limit_delay=0.5)
+            prefetched_balances = parse_stake_balances(_c.get_wallet_stakes())
+            holdings = sorted(prefetched_balances) or CURRENT_HOLDINGS
+            logger.info(f"Wallet holdings from chain: {holdings} ({len(holdings)} subnets)")
         except Exception as e:
             logger.warning(f"On-chain holdings fetch failed ({e}) — using fallback")
             holdings = CURRENT_HOLDINGS
@@ -868,6 +922,7 @@ def main():
         holdings_history=args.holdings_history,
         candidate_budget=args.candidates,
         cost_basis=args.cost_basis,
+        prefetched_balances=prefetched_balances,
     )
 
     if "error" in result:
