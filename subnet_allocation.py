@@ -79,11 +79,14 @@ class AllocationPolicy:
     # ── Axis 2: tiering off health_score.
     health_aplus: float = 70.0
     health_a:     float = 55.0
-    health_b:     float = 40.0
+    health_b:     float = 45.0             # was 40 — cut marginal sideways harder ("be Siam")
     cut_on_bear_regime: bool = True        # markov Bear → EXIT regardless of health
 
     # ── Caps / guards.
-    aplus_max_weight: float = 0.40         # no single A+ above 40% of DEPLOYED
+    max_weight_per_name: float = 0.40      # no single name above 40% of DEPLOYED (any tier).
+                                           # Stops a lone green taking ~100% in a thin bull book;
+                                           # overflow parks in SN0 (conservative, on-model).
+    aplus_max_weight: float = 0.40         # optional tighter A+-specific cap (min() with the above)
     max_positions:    int   = 10           # ≤10 green names at once
     pool_fraction_cap: float = 0.01        # position ≤ 1% of pool depth (needs account_tao;
                                            # inert at current size — bites only as you scale)
@@ -244,14 +247,18 @@ def compute_target_allocation(
         # fraction of account = (conviction share) × deployed fraction
         weights = {sid: (w / total_raw) * f for sid, w in raw.items()}
 
-        # ── A+ cap (per single A+ name, as a share of DEPLOYED) ──────────────
+        # ── Per-name cap (every tier, as a share of DEPLOYED) ────────────────
+        # Generalises the old A+-only cap so no single name (any tier) can take
+        # ~100% of a thin book. A+ keeps an optionally-tighter cap via min().
         capped_flags: dict[int, str] = {}
+        per_name_cap_abs = policy.max_weight_per_name * f
         aplus_cap_abs = policy.aplus_max_weight * f
         for s, tier, _, _ in survivors:
             sid = int(getattr(s, "subnet_id"))
-            if tier == Tier.APLUS and weights[sid] > aplus_cap_abs:
-                capped_flags[sid] = "aplus"
-                weights[sid] = aplus_cap_abs
+            cap_abs = min(per_name_cap_abs, aplus_cap_abs) if tier == Tier.APLUS else per_name_cap_abs
+            if weights[sid] > cap_abs:
+                capped_flags[sid] = "aplus" if tier == Tier.APLUS else "name"
+                weights[sid] = cap_abs
 
         # ── Pool cap (needs account size; inert at current scale) ────────────
         if account_tao and account_tao > 0:
