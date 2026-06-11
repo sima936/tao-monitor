@@ -622,14 +622,11 @@ const FILTERS = {
 
   
 
-// Portfolio target allocations (% of total). Held-only keys.
-// Dropped stale non-held 5/32/75. SN0 is dust (house money) → 0%.
-// TODO: assign intended weights for 46 (Zipcode) and 107 (Minos) — left 0
-// until Simon sets the split; missing keys render as 0% via `|| 0`.
-const TARGETS = {
-  9: 16, 68: 14, 44: 12, 55: 11, 4: 11, 123: 9,
-  0: 0, 46: 0, 107: 0
-};
+// Portfolio targets are now DERIVED by the allocation engine ("be Siam") and
+// arrive via /api/score → `allocation`. The hand-set TARGETS table is gone:
+//   target % per holding = allocation.positions[].target_weight × 100
+//   any held name in allocation.cut targets 0% (→ trim / exit).
+// See subnet_allocation.py / Allocation_Design_v1.md.
 
 // ── State ───────────────────────────────────────────────────────────────────
 let allSubnets = [];
@@ -993,10 +990,19 @@ function resolveSubnetName(netuid, nameByNetuid) {
   return (nameByNetuid && nameByNetuid[netuid]) || SUBNET_NAME_FALLBACK[netuid] || ('SN' + netuid);
 }
 
-function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis) {
+function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   const tbody = document.getElementById('portfolio-body');
   const gbp = priceData.bittensor?.gbp || 0;
   const cbPos = (costBasis && costBasis.positions) || {};
+
+  // Derived targets (% of account) from the allocation engine. Held greens
+  // carry target_weight; cut names target 0% so over-allocated holdings flag red.
+  const alloc = (score && score.allocation) || null;
+  const targetPctByNetuid = {};
+  if (alloc) {
+    (alloc.positions || []).forEach(p => { targetPctByNetuid[p.subnet_id] = (p.target_weight || 0) * 100; });
+    (alloc.cut || []).forEach(c => { if (!(c.subnet_id in targetPctByNetuid)) targetPctByNetuid[c.subnet_id] = 0; });
+  }
 
   const positions = (stakeData.data || [])
     .filter(s => {
@@ -1055,10 +1061,11 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis) {
   positions.forEach((p, i) => {
     const valGbp = p.tao * gbp;
     const actualPct = totalTao > 0 ? (p.tao / totalTao) * 100 : 0;
-    const targetPct = TARGETS[p.netuid] || 0;
-    const drift = actualPct - targetPct;
-    const driftCls = Math.abs(drift) < 2 ? 'drift-ok' : Math.abs(drift) < 5 ? 'drift-warn' : 'drift-danger';
-    const driftStr = drift >= 0 ? '+' + drift.toFixed(1) + '%' : drift.toFixed(1) + '%';
+    const hasTarget = alloc != null && (p.netuid in targetPctByNetuid);
+    const targetPct = hasTarget ? targetPctByNetuid[p.netuid] : null;
+    const drift = hasTarget ? actualPct - targetPct : null;
+    const driftCls = drift == null ? '' : Math.abs(drift) < 2 ? 'drift-ok' : Math.abs(drift) < 5 ? 'drift-warn' : 'drift-danger';
+    const driftStr = drift == null ? '—' : (drift >= 0 ? '+' + drift.toFixed(1) + '%' : drift.toFixed(1) + '%');
     const color = colors[i % colors.length];
 
     const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
@@ -1074,15 +1081,15 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis) {
       <td>${pnlPct != null ? pctCell(pnlPct) : '<span class="pct-neutral">—</span>'}</td>
       <td>£${valGbp.toFixed(2)}</td>
       <td class="hide-mobile">${actualPct.toFixed(1)}%</td>
-      <td class="hide-mobile">${targetPct > 0 ? targetPct + '%' : '—'}</td>
-      <td class="hide-mobile ${driftCls}">${targetPct > 0 ? driftStr : '—'}</td>
+      <td class="hide-mobile">${targetPct != null ? targetPct.toFixed(1) + '%' : '—'}</td>
+      <td class="hide-mobile ${driftCls}">${drift != null ? driftStr : '—'}</td>
     </tr>`;
 
     allocHtml += `<div class="alloc-bar-row">
       <div class="alloc-label">SN${p.netuid} ${p.name}</div>
       <div class="alloc-track">
         <div class="alloc-fill" style="width:${Math.min(actualPct * 2.5, 100)}%;background:${color}"></div>
-        ${targetPct > 0 ? `<div class="alloc-target-line" style="left:${Math.min(targetPct * 2.5, 100)}%"></div>` : ''}
+        ${targetPct != null && targetPct > 0 ? `<div class="alloc-target-line" style="left:${Math.min(targetPct * 2.5, 100)}%"></div>` : ''}
       </div>
       <div class="alloc-pct">${actualPct.toFixed(1)}%</div>
     </div>`;
@@ -1120,9 +1127,11 @@ async function loadData() {
       if (!isNaN(n) && p.name) nameByNetuid[n] = p.name;
     });
 
-    // Portfolio — fetch in parallel, don't block scanner if it fails
-    Promise.all([fetchPortfolioStakes(), fetchCostBasis()]).then(([stakeData, costBasis]) => {
-      renderPortfolio(stakeData, priceData, nameByNetuid, costBasis);
+    // Portfolio — fetch in parallel, don't block scanner if it fails.
+    // fetchScore() supplies the allocation block (derived targets/drift); it's
+    // optional, so a missing/old score just renders targets as '—'.
+    Promise.all([fetchPortfolioStakes(), fetchCostBasis(), fetchScore().catch(() => null)]).then(([stakeData, costBasis, score]) => {
+      renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score);
     }).catch(err => {
       console.warn('Portfolio fetch failed:', err);
       document.getElementById('portfolio-body').innerHTML =
