@@ -81,11 +81,15 @@ class AllocationPolicy:
     health_a:     float = 55.0
     health_b:     float = 45.0             # was 40 — cut marginal sideways harder ("be Siam")
     cut_on_bear_regime: bool = True        # markov Bear → EXIT regardless of health
+    new_entries_only_in_bull: bool = True  # Sideways/Bear/Unknown macro → no NEW (un-held) names
+                                           # in the book; rotate in only on Bull. Discovery lives
+                                           # on the Opportunities tab, not the allocation plan.
 
     # ── Caps / guards.
-    max_weight_per_name: float = 0.40      # no single name above 40% of DEPLOYED (any tier).
-                                           # Stops a lone green taking ~100% in a thin bull book;
-                                           # overflow parks in SN0 (conservative, on-model).
+    max_weight_per_name: float = 0.40      # no single name above 40% of the ACCOUNT (any tier).
+                                           # Of-account (not of-deployed) keeps the cap orthogonal
+                                           # to the Axis-1 dial: prevents ~100%-one-name in a bull
+                                           # without shaving a lone green in a low-deploy bear.
     aplus_max_weight: float = 0.40         # optional tighter A+-specific cap (min() with the above)
     max_positions:    int   = 10           # ≤10 green names at once
     pool_fraction_cap: float = 0.01        # position ≤ 1% of pool depth (needs account_tao;
@@ -206,11 +210,24 @@ def compute_target_allocation(
         notes.append("Macro unavailable — deployed fraction set conservatively; treat new entries as deferred.")
 
     # ── Axis 2: classify ──────────────────────────────────────────────────────
+    # Capital preservation: outside a Bull macro, don't introduce NEW (un-held)
+    # names into the book — hold/cut what you have, rotate in only on Bull. Needs
+    # holdings (current_weight_by_id); on the holdings-less /status path this is a
+    # no-op (run() already feeds holdings-only there).
+    held_ids_known = current_weight_by_id is not None
+    held_set = {sid for sid, w in (current_weight_by_id or {}).items() if w and w > 0}
+    allow_new_entries = (regime == "Bull") or (not policy.new_entries_only_in_bull)
+    suppressed_new = 0
+
     survivors: list = []
     cut: list[dict] = []
     for s in eligible_scored:
-        if int(getattr(s, "subnet_id")) == sn0_id:
+        sid0 = int(getattr(s, "subnet_id"))
+        if sid0 == sn0_id:
             continue  # SN0 is the sink, never a holding
+        if held_ids_known and not allow_new_entries and sid0 not in held_set:
+            suppressed_new += 1
+            continue  # non-Bull macro → no new exposure; leave discovery to Opportunities
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
         tier = classify_tier(health, s_regime, policy)
@@ -247,12 +264,14 @@ def compute_target_allocation(
         # fraction of account = (conviction share) × deployed fraction
         weights = {sid: (w / total_raw) * f for sid, w in raw.items()}
 
-        # ── Per-name cap (every tier, as a share of DEPLOYED) ────────────────
-        # Generalises the old A+-only cap so no single name (any tier) can take
-        # ~100% of a thin book. A+ keeps an optionally-tighter cap via min().
+        # ── Per-name cap (every tier, as a share of the ACCOUNT) ─────────────
+        # Of-account (not of-deployed) keeps the cap orthogonal to the dial: it
+        # prevents ~100%-one-name in a bull, but never shaves a lone green in a
+        # low-deploy bear (which would make deploy% and SN0% disagree). A+ keeps
+        # an optionally-tighter cap via min().
         capped_flags: dict[int, str] = {}
-        per_name_cap_abs = policy.max_weight_per_name * f
-        aplus_cap_abs = policy.aplus_max_weight * f
+        per_name_cap_abs = policy.max_weight_per_name
+        aplus_cap_abs = policy.aplus_max_weight
         for s, tier, _, _ in survivors:
             sid = int(getattr(s, "subnet_id"))
             cap_abs = min(per_name_cap_abs, aplus_cap_abs) if tier == Tier.APLUS else per_name_cap_abs
@@ -316,6 +335,8 @@ def compute_target_allocation(
 
     if regime == "Bear":
         notes.append("Macro Bear — ENTER/ADD actions are advisory; defer new exposure, prioritise the EXITs.")
+    if suppressed_new:
+        notes.append(f"{regime} macro — new entries suppressed ({suppressed_new} healthy non-held names held back); book limited to current holdings. Rotate in on Bull (see Opportunities).")
 
     return AllocationPlan(
         macro_signal=signal,
