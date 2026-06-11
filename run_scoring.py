@@ -769,8 +769,14 @@ def run(
         {sid: b / account_tao for sid, b in bal_by_netuid.items()}
         if (bal_by_netuid and account_tao) else None
     )
+    # Size only REAL-DATA subnets: the enrichment `targets` (holdings + watchlist
+    # + movers that received real history/Gini) ∪ holdings. Excludes the ~100
+    # placeholder-history subnets whose health scores aren't trustworthy — those
+    # live on the Opportunities tab (data-maturity gated), not in the book.
+    real_data_ids = set(targets) | set(holdings)
+    eligible_scored = [s for s in result.ranked_by_health if s.subnet_id in real_data_ids]
     plan = compute_target_allocation(
-        result.ranked_by_health,                # pre-filter survivors, sized off health_score
+        eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
         account_tao=account_tao,
         current_weight_by_id=current_weight_by_id,
