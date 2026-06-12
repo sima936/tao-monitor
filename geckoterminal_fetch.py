@@ -58,8 +58,10 @@ GT_NETWORK = "bittensor"
 # Pin the Beta API version (docs explicitly recommend this to avoid surprises).
 GT_HEADERS = {"Accept": "application/json;version=20230302"}
 
-# Free public API is ~30 calls/min. 2.1s spacing keeps us comfortably under it.
-DEFAULT_SPACING_S = 2.1
+# GT free public API rate-limits aggressively (saw 429s at ~28/min). 4s spacing
+# (~15/min) leaves comfortable headroom; the per-call retry below absorbs the
+# occasional 429 on top of that.
+DEFAULT_SPACING_S = 4.0
 
 
 def pool_address(netuid: int) -> str:
@@ -92,16 +94,37 @@ def fetch_daily_closes(
     url = f"{GT_BASE}/networks/{GT_NETWORK}/pools/{pool_address(netuid)}/ohlcv/day"
     params = {"aggregate": 1, "limit": min(int(limit), 1000), "currency": currency}
 
-    try:
-        resp = sess.get(url, params=params, headers=GT_HEADERS, timeout=timeout)
-        if resp.status_code == 429:
-            logger.warning(f"SN{netuid}: GT rate-limited (429) — backing off 5s")
-            time.sleep(5)
+    # Up to 3 retries on 429 / transient errors, exponential backoff, honoring
+    # any Retry-After header GT sends. Never raise — return [] so the caller
+    # keeps its existing history and the cron never crashes.
+    backoffs = [5, 10, 20]
+    payload = None
+    for attempt in range(len(backoffs) + 1):
+        try:
             resp = sess.get(url, params=params, headers=GT_HEADERS, timeout=timeout)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as e:  # noqa: BLE001 — never let a fetch kill the cycle
-        logger.warning(f"SN{netuid}: GT fetch failed: {e}")
+            if resp.status_code == 429:
+                if attempt >= len(backoffs):
+                    logger.warning(f"SN{netuid}: GT 429 — gave up after {attempt} retries")
+                    return [], []
+                wait = backoffs[attempt]
+                ra = resp.headers.get("Retry-After", "")
+                if ra.isdigit():
+                    wait = max(wait, int(ra))
+                logger.warning(f"SN{netuid}: GT 429 — backing off {wait}s (retry {attempt + 1})")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            break
+        except Exception as e:  # noqa: BLE001 — never let a fetch kill the cycle
+            if attempt < len(backoffs):
+                logger.warning(f"SN{netuid}: GT error ({e}) — retry {attempt + 1}")
+                time.sleep(backoffs[attempt])
+                continue
+            logger.warning(f"SN{netuid}: GT fetch failed after retries: {e}")
+            return [], []
+
+    if payload is None:
         return [], []
 
     try:
