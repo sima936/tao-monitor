@@ -771,13 +771,14 @@ def score_subnet(
     entry_score  = sum(ENTRY_W[k]  * pmap[k] for k in ENTRY_W)
     health_score = sum(HEALTH_W[k] * pmap[k] for k in HEALTH_W)
 
-    # Macro suppression on entry
-    if macro.regime == MacroRegime.BEAR:
-        entry_score *= 0.3
-    elif macro.regime == MacroRegime.SIDEWAYS:
-        entry_score *= 0.7
-    elif macro.regime == MacroRegime.UNKNOWN:
-        entry_score *= 0.5
+    # NOTE: macro is single-counted by design. It enters entry_score once, via
+    # p2_macro (ENTRY_W weight 0.15). The old blunt post-composite multiplier
+    # (entry_score *= 0.3/0.5/0.7 by regime) has been REMOVED — gross-exposure
+    # suppression now lives at the allocation layer (subnet_allocation.py Axis-1
+    # "dial": macro.signal → deployed fraction, rest parked in SN0), and new-entry
+    # suppression is enforced by the digest BUY gate + new_entries_only_in_bull.
+    # Multiplying here as well triple-counted the macro and squashed the displayed
+    # entry numbers without changing rank (the multiplier was uniform per regime).
 
     return SubnetScore(
         subnet_id=metrics.subnet_id,
