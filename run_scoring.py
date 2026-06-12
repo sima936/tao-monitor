@@ -60,6 +60,7 @@ from subnet_allocation import (
     AllocationPolicy,
     format_allocation_plan,
 )
+from geckoterminal_fetch import fetch_history_for_netuids
 
 logger = logging.getLogger("tao_scoring_runner")
 
@@ -734,11 +735,22 @@ def run(
             all_metrics, fetch_holdings_gini(targets, api_key)
         )
 
-    # Replace synthetic 9-bar history with real daily bars for the target set
-    # (opt-in, cron only — adds ~12.5s/subnet; never on the 60s /status path).
+    # Replace synthetic 9-bar history with REAL daily bars for the target set.
+    # PRIMARY: GeckoTerminal daily OHLCV (free, no key, ~90 bars, TAO-denominated
+    #   — values match taostats; fixes the synthetic-anchor regime instability
+    #   that whipsawed holdings, e.g. Minos flipping Bull/Sideways on a flat price).
+    # FALLBACK: taostats pool/history only for subnets GT didn't return (new pools).
+    # Same {netuid: (closes, timestamps)} contract → drops into apply_history_overrides.
     if holdings_history:
-        history = fetch_holdings_history(client, targets)
+        gt_hist = fetch_history_for_netuids(targets)
+        missing = [n for n in targets if n != 0 and n not in gt_hist]
+        ts_hist = fetch_holdings_history(client, missing) if missing else {}
+        history = {**ts_hist, **gt_hist}  # GT wins on any overlap
         all_metrics = apply_history_overrides(all_metrics, history)
+        logger.info(
+            f"Real history: {len(gt_hist)} from GeckoTerminal, "
+            f"{len(ts_hist)} from taostats fallback ({len(missing)} not on GT)"
+        )
 
     # Convert macro dict → TaoMacroState for scoring engine
     macro_state = macro_dict_to_state(macro)
