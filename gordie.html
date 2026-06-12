@@ -519,7 +519,7 @@ footer {
     <div class="section-title">Top Opportunities — v4 engine <span class="badge" id="opp-badge">—</span></div>
     <div id="opp-macro"></div>
     <div style="font-size:0.7rem;color:var(--muted);margin:0.25rem 0 0.5rem">
-      Real-data subnets only (data-maturity 100), sorted by entry_score (macro-scaled). Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
+      Real-data subnets only (data-maturity 100), sorted by entry_score (pullback quality, macro-aware via p2). New entries are macro-gated — acted on only in Bull. Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
     </div>
     <table>
       <thead>
@@ -847,15 +847,16 @@ function renderOpportunities(score) {
     return;
   }
 
-  // ── Macro banner (entry_score is already macro-scaled by the engine) ──
+  // ── Macro banner (entry_score is macro-aware via p2; gross-exposure
+  //    suppression lives at the allocation dial, new-entry suppression at the gate) ──
   const m = score.macro;
   if (banner) {
     if (m && m.regime && m.regime !== 'Unknown') {
       const reg = m.regime;
       const col = reg === 'Bear' ? 'var(--red)' : reg === 'Bull' ? 'var(--green)' : 'var(--gold)';
-      const note = reg === 'Bear'     ? 'entries suppressed ×0.3 — capital preservation'
-                 : reg === 'Sideways' ? 'entries dampened ×0.5 — hold conviction'
-                 : reg === 'Bull'     ? 'entries scaled ×0.7 — rotate actively'
+      const note = reg === 'Bear'     ? 'no new entries — capital preservation (rank only)'
+                 : reg === 'Sideways' ? 'no new entries — hold conviction (rank only)'
+                 : reg === 'Bull'     ? 'entries live — rotate actively'
                  : '';
       const sig = (m.signal === null || m.signal === undefined) ? '—' : m.signal.toFixed(2);
       banner.innerHTML =
