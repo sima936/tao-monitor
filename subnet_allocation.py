@@ -48,15 +48,17 @@ if TYPE_CHECKING:  # avoid a hard import cycle; runtime is pure duck-typing
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Tier(Enum):
-    APLUS = "A+"
-    A     = "A"
-    B     = "B"
-    EXIT  = "exit"
+    APLUS      = "A+"
+    A          = "A"
+    B          = "B"
+    CONVICTION = "CV"   # tagged real-utility vertical, rescued from the marginal
+                        # health-floor cut; held at a sub-B toehold (see policy).
+    EXIT       = "exit"
 
 
 # Relative conviction weights per tier (Axis 2). Only the RATIOS matter — they
 # are normalised across survivors, so {A+:4, A:2, B:1} means an A+ gets 4× a B.
-TIER_WEIGHT = {Tier.APLUS: 4.0, Tier.A: 2.0, Tier.B: 1.0, Tier.EXIT: 0.0}
+TIER_WEIGHT = {Tier.APLUS: 4.0, Tier.A: 2.0, Tier.B: 1.0, Tier.CONVICTION: 0.5, Tier.EXIT: 0.0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +86,17 @@ class AllocationPolicy:
     new_entries_only_in_bull: bool = True  # Sideways/Bear/Unknown macro → no NEW (un-held) names
                                            # in the book; rotate in only on Bull. Discovery lives
                                            # on the Opportunities tab, not the allocation plan.
+
+    # ── Conviction guard. Named real-utility verticals are exempt from the
+    #    MARGINAL health-floor cut (NOT the Bear-regime cut): instead of →SN0
+    #    they drop to the sub-B CONVICTION tier and keep a small toehold, sized
+    #    through the same Axis-1 dial as everything else. Tag on thesis, not
+    #    price — a name's weakness today is why the floor helps, not a reason to
+    #    drop the tag. A tagged name that flips to a real Markov Bear still exits.
+    #    {4 Targon, 107 Minos, 46 Zipcode, 44 Score, 68 NOVA, 123 MANTIS}.
+    #    NIOME (55) deliberately excluded — unmapped, keeps the set from
+    #    collapsing into "just the current book".
+    conviction_tags: frozenset = frozenset({4, 107, 46, 44, 68, 123})
 
     # ── Caps / guards.
     max_weight_per_name: float = 0.40      # no single name above 40% of the ACCOUNT (any tier).
@@ -218,6 +231,7 @@ def compute_target_allocation(
     held_set = {sid for sid, w in (current_weight_by_id or {}).items() if w and w > 0}
     allow_new_entries = (regime == "Bull") or (not policy.new_entries_only_in_bull)
     suppressed_new = 0
+    conviction_floored = 0
 
     survivors: list = []
     cut: list[dict] = []
@@ -231,6 +245,14 @@ def compute_target_allocation(
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
         tier = classify_tier(health, s_regime, policy)
+        # Conviction guard: a tagged real-utility vertical cut ONLY on the
+        # marginal health floor (not a confirmed Bear regime) keeps a small
+        # toehold instead of being binned to SN0. Bear-regime cuts still exit.
+        if (tier == Tier.EXIT
+                and sid0 in policy.conviction_tags
+                and not (policy.cut_on_bear_regime and s_regime == "Bear")):
+            tier = Tier.CONVICTION
+            conviction_floored += 1
         if tier == Tier.EXIT:
             cut.append({
                 "subnet_id": int(getattr(s, "subnet_id")),
@@ -337,6 +359,8 @@ def compute_target_allocation(
         notes.append("Macro Bear — ENTER/ADD actions are advisory; defer new exposure, prioritise the EXITs.")
     if suppressed_new:
         notes.append(f"{regime} macro — new entries suppressed ({suppressed_new} healthy non-held names held back); book limited to current holdings. Rotate in on Bull (see Opportunities).")
+    if conviction_floored:
+        notes.append(f"{conviction_floored} conviction-tagged vertical(s) floored at CV tier through the health cut — thesis-held at a toehold; would still exit on a Bear-regime flip.")
 
     return AllocationPlan(
         macro_signal=signal,
