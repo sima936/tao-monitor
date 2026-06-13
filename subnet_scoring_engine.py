@@ -61,7 +61,7 @@ EMA_PERIOD       = 24      # daily-bar EMA (~1 trading month). Was 72 — that i
 # Raised to accommodate real holdings (SN4 ~0.054, SN51 ~0.051, SN64 ~0.10+)
 # Pool cap raised to match actual subnet pool sizes (SN62/68/75 ~35-130k TAO)
 MAX_TOKEN_PRICE  = 0.15    # was 0.04 — covers all current holdings incl. SN64
-MIN_POOL_DEPTH   = 5.0
+MIN_POOL_DEPTH   = 5000.0   # was 5.0 (dust) — kills 1-2.5k thin pools; smallest hold ~7k (MANTIS)
 MAX_POOL_DEPTH   = 500000.0  # was 5000 — covers SN4 (130k), SN51 (114k)
 MAX_GENIE_SCORE  = 0.85
 
