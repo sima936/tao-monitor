@@ -474,7 +474,7 @@ footer {
 
   <!-- Scanner Tab (was Holdings) -->
   <div class="tab-content" id="tab-holdings">
-    <div class="section-title">Current Holdings <span class="badge" id="holdings-badge">7 positions</span></div>
+    <div class="section-title">Current Holdings <span class="badge" id="holdings-badge">—</span></div>
     <table>
       <thead>
         <tr>
@@ -804,6 +804,7 @@ function renderHoldings(results) {
 
   tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:1rem">No holding data</td></tr>';
 
+  document.getElementById('holdings-badge').textContent = rows.length + ' position' + (rows.length === 1 ? '' : 's');
   document.getElementById('alert-count').textContent = alertCount;
   document.getElementById('alert-count').className = 'card-value ' + (alertCount > 0 ? 'red' : 'green');
   document.getElementById('alert-sub').textContent = alertCount > 0 ? alertCount + ' need attention' : 'All healthy';
