@@ -84,6 +84,13 @@ STATE_FILE = Path(os.environ.get("STATE_FILE", str(Path(__file__).parent / "scor
 # Point SCORE_LOG_PATH at a Railway Volume so it accumulates across cron runs — a
 # local path resets every ephemeral run/redeploy (see DEPLOY note in handoff).
 SCORE_LOG_PATH = Path(os.environ.get("SCORE_LOG_PATH", str(Path(__file__).parent / "score_log.csv")))
+# Persistent last-good Gini cache (volume-backed). Concentration drifts slowly,
+# so when a live taostats fetch rate-limits a holding we reuse its last REAL
+# value rather than a fake 0.5 (which also wrongly slips concentrated names past
+# the genie pre-filter). Point GINI_CACHE_PATH at the same Volume as
+# SCORE_LOG_PATH so it survives ephemeral cron containers.
+GINI_CACHE_PATH = Path(os.environ.get("GINI_CACHE_PATH", str(Path(__file__).parent / "gini_cache.json")))
+GINI_CACHE_MAX_AGE_H = float(os.environ.get("GINI_CACHE_MAX_AGE_H", 48))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -383,28 +390,50 @@ def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_gini_cache() -> dict[int, float]:
-    """
-    Load Gini scores written by gini_fetch.py.
+    """Load the persistent last-good Gini cache (real values from prior runs).
 
-    gini_fetch.py writes /home/simar/tao-monitor/gini_cache.json:
-        { "4": 0.92, "51": 0.95, "62": 0.97, ... }
-
-    Returns empty dict if cache missing or stale (>2h old).
+    Written by save_gini_cache() to GINI_CACHE_PATH. Concentration drifts
+    slowly, so a value up to GINI_CACHE_MAX_AGE_H old is a far better stand-in
+    than the 0.5 placeholder when a live fetch rate-limits — and it keeps the
+    genie pre-filter honest (0.5 would wrongly pass a concentrated name).
+    Returns {} if the cache is missing or older than the cap.
     """
-    cache_path = Path("/home/simar/tao-monitor/gini_cache.json")
     try:
-        if not cache_path.exists():
+        if not GINI_CACHE_PATH.exists():
             return {}
-        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
-        if age_hours > 2:
-            logger.warning(f"Gini cache is {age_hours:.1f}h old — using placeholders")
+        age_hours = (time.time() - GINI_CACHE_PATH.stat().st_mtime) / 3600
+        if age_hours > GINI_CACHE_MAX_AGE_H:
+            logger.warning(
+                f"Gini cache {age_hours:.1f}h old (> {GINI_CACHE_MAX_AGE_H:.0f}h cap) — ignoring"
+            )
             return {}
-        data = json.loads(cache_path.read_text())
-        # Keys may be strings
+        data = json.loads(GINI_CACHE_PATH.read_text())
         return {int(k): float(v) for k, v in data.items()}
     except Exception as e:
         logger.warning(f"Could not load gini cache: {e}")
         return {}
+
+
+def save_gini_cache(scores: dict[int, float]) -> None:
+    """Persist fresh real Gini values into the last-good store, merging with any
+    existing file so names not refreshed this run keep their previous real value.
+    Point GINI_CACHE_PATH at a Volume or this resets each ephemeral run."""
+    if not scores:
+        return
+    try:
+        existing: dict[int, float] = {}
+        if GINI_CACHE_PATH.exists():
+            try:
+                existing = {int(k): float(v)
+                            for k, v in json.loads(GINI_CACHE_PATH.read_text()).items()}
+            except Exception:
+                existing = {}
+        merged = {**existing, **{int(k): float(v) for k, v in scores.items()}}
+        GINI_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        GINI_CACHE_PATH.write_text(json.dumps(merged, indent=2))
+        logger.info(f"Gini cache: saved {len(scores)} fresh → {GINI_CACHE_PATH} ({len(merged)} total)")
+    except Exception as e:
+        logger.warning(f"Could not save gini cache: {e}")
 
 
 def apply_gini_overrides(
@@ -426,12 +455,12 @@ def apply_gini_overrides(
 def fetch_holdings_gini(holdings: list[int], api_key: str) -> dict[int, float]:
     """In-process Gini fetch for holdings only — Railway-friendly.
 
-    The Infinity8 gini_cache.json path (load_gini_cache) is dead on Railway:
-    the cron runs in an ephemeral container that can't see /home/simar.
-    This computes real Gini for the held subnets in-process via GiniFetcher
+    Computes real Gini for the held subnets in-process via GiniFetcher
     (SDK → RPC → Taostats fallback). Bounded to holdings, so ~12.5s/subnet on
     the Taostats fallback (≈100s for 8 subnets) — fine on the 12h cron, but
-    NEVER call this from /status (60s subprocess timeout).
+    NEVER call this from /status (60s subprocess timeout). Values that come back
+    are real only (0.5 placeholders dropped); whatever the live fetch can't reach
+    is filled from the persistent last-good cache (load_gini_cache) by the caller.
 
     SN0 (Root/Kraken) is skipped: it always fails the price filter and its
     metagraph is not a meaningful concentration signal.
@@ -819,12 +848,22 @@ def run(
     else:
         targets = list(holdings)
 
-    # Real Gini for the target set, in-process (Railway path), only if the disk
-    # cache didn't already supply it. Opt-in, cron only — ~12.5s/subnet.
-    if holdings_gini and not gini_cache:
-        all_metrics = apply_gini_overrides(
-            all_metrics, fetch_holdings_gini(targets, api_key)
-        )
+    # Real Gini for the target set, in-process. The persistent last-good cache
+    # was already applied above, so any holding the live fetch can't reach
+    # (taostats rate-limit) keeps its previous REAL value, never a fake 0.5.
+    # Fresh values override on top and are written back to keep the cache current.
+    # Opt-in, cron only — ~12.5s/subnet.
+    if holdings_gini:
+        fresh = fetch_holdings_gini(targets, api_key)   # real values only (0.5 dropped)
+        if fresh:
+            all_metrics = apply_gini_overrides(all_metrics, fresh)
+            save_gini_cache(fresh)
+        reused = [n for n in targets if n != 0 and n not in fresh and n in gini_cache]
+        if reused:
+            logger.info(
+                f"Gini: {len(fresh)} fresh, {len(reused)} reused from cache "
+                f"(≤{GINI_CACHE_MAX_AGE_H:.0f}h old): {reused}"
+            )
 
     # Replace synthetic 9-bar history with REAL daily bars for the target set.
     # PRIMARY: GeckoTerminal daily OHLCV (free, no key, ~90 bars, TAO-denominated
