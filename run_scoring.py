@@ -543,6 +543,39 @@ def apply_history_overrides(
     return all_metrics
 
 
+def _drop_forming_bar(
+    prices: list[float], stamps: list[str]
+) -> tuple[list[float], list[str]]:
+    """Drop the most recent bar iff it is today's still-forming UTC-day bar.
+
+    GeckoTerminal (and taostats) include the current UTC day as a partial,
+    continuously-updating candle. Using it as the endpoint for the 7d return,
+    the EMA, and the Markov regime label makes the regime whipsaw intraday and
+    especially across the 00:00 UTC roll (e.g. Zipcode read +23% at 23:06 and
+    +2% an hour later at 00:11 with no real move — the window's right edge slid
+    onto a near-empty new bar). Keeping only CLOSED days makes every run within
+    a UTC day read an identical series; the reading steps once per day at the
+    close, and cron timing stops affecting the regime.
+
+    Conditional on date, not unconditional: if a run fires before today's bar
+    exists yet, the last bar is already a closed prior day — keep it. Never
+    empties the series (guarded to len > 1) and leaves unparseable stamps alone.
+    """
+    if not prices or not stamps or len(prices) != len(stamps) or len(prices) <= 1:
+        return prices, stamps
+    try:
+        last_date = (
+            datetime.fromisoformat(str(stamps[-1]).replace("Z", "+00:00"))
+            .astimezone(timezone.utc)
+            .date()
+        )
+    except Exception:
+        return prices, stamps  # unparseable timestamp → leave untouched
+    if last_date == datetime.now(timezone.utc).date():
+        return prices[:-1], stamps[:-1]
+    return prices, stamps
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Candidate set for real-data enrichment (free-tier API budget)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -804,7 +837,20 @@ def run(
         missing = [n for n in targets if n != 0 and n not in gt_hist]
         ts_hist = fetch_holdings_history(client, missing) if missing else {}
         history = {**ts_hist, **gt_hist}  # GT wins on any overlap
+        # Drop today's still-forming UTC-day bar so regime/EMA/7d use CLOSED
+        # days only — kills the intraday / midnight-roll whipsaw.
+        _trimmed = 0
+        _clean = {}
+        for _n, (_p, _t) in history.items():
+            _p2, _t2 = _drop_forming_bar(_p, _t)
+            if len(_p2) != len(_p):
+                _trimmed += 1
+            _clean[_n] = (_p2, _t2)
+        history = _clean
         all_metrics = apply_history_overrides(all_metrics, history)
+        logger.info(
+            f"Closed-bar trim: dropped today's forming bar on {_trimmed}/{len(history)} series"
+        )
         logger.info(
             f"Real history: {len(gt_hist)} from GeckoTerminal, "
             f"{len(ts_hist)} from taostats fallback ({len(missing)} not on GT)"
