@@ -37,11 +37,13 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -78,6 +80,10 @@ TOP_N = 5  # reduced from 10 — keeps alerts shorter
 # Alert frequency control
 DIGEST_INTERVAL_HOURS = int(os.environ.get("DIGEST_HOURS", 4))
 STATE_FILE = Path(os.environ.get("STATE_FILE", str(Path(__file__).parent / "scoring_state.json")))
+# Per-cycle calibration log (consumed offline by score_calibration.py). Gitignored.
+# Point SCORE_LOG_PATH at a Railway Volume so it accumulates across cron runs — a
+# local path resets every ephemeral run/redeploy (see DEPLOY note in handoff).
+SCORE_LOG_PATH = Path(os.environ.get("SCORE_LOG_PATH", str(Path(__file__).parent / "score_log.csv")))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +106,58 @@ def save_state(state: dict) -> None:
         STATE_FILE.write_text(json.dumps(state, indent=2))
     except Exception as e:
         logger.warning(f"Could not save state: {e}")
+
+
+def append_score_log(result, scored, path: Path = SCORE_LOG_PATH) -> None:
+    """Append one snapshot row per real-data subnet for offline calibration.
+
+    Schema is the contract score_calibration.py reads: ts, subnet_id, name,
+    price, composite (= health_score, the exit/hold metric the allocator sizes
+    off), plus every engine component as f_<param> — auto-derived from
+    ParameterScores, so a future p11 flows through to the analyzer untouched.
+
+    Snapshot only — NO lookahead. Forward returns are joined per-subnet in the
+    analyzer. Only `scored` (real-data survivors) are logged; the ~100
+    placeholder-history subnets have untrustworthy scores and are excluded for
+    the same reason they're kept out of the book.
+    """
+    if not scored:
+        return
+    try:
+        factor_keys = None
+        rows = []
+        for s in scored:
+            params = asdict(s.params) if getattr(s, "params", None) else {}
+            if factor_keys is None:
+                factor_keys = sorted(params.keys())
+            row = {
+                "ts": result.timestamp,
+                "subnet_id": s.subnet_id,
+                "name": s.name,
+                "price": s.token_price,
+                "composite": round(float(s.health_score), 2),
+                "entry_score": round(float(s.entry_score), 2),
+                "markov_regime": s.markov_regime,
+            }
+            for k in factor_keys:
+                row[f"f_{k}"] = round(float(params[k]), 2)
+            rows.append(row)
+
+        fieldnames = (
+            ["ts", "subnet_id", "name", "price", "composite",
+             "entry_score", "markov_regime"]
+            + [f"f_{k}" for k in (factor_keys or [])]
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_file = (not path.exists()) or path.stat().st_size == 0
+        with path.open("a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fieldnames)
+            if new_file:
+                w.writeheader()
+            w.writerows(rows)
+        logger.info(f"Score log: appended {len(rows)} rows → {path}")
+    except Exception as e:
+        logger.warning(f"Score log append failed (non-fatal): {e}")
 
 
 def extract_state_snapshot(result, holdings: list[int]) -> dict:
@@ -787,6 +845,7 @@ def run(
     # live on the Opportunities tab (data-maturity gated), not in the book.
     real_data_ids = set(targets) | set(holdings)
     eligible_scored = [s for s in result.ranked_by_health if s.subnet_id in real_data_ids]
+    append_score_log(result, eligible_scored)   # per-cycle calibration snapshot (gitignored)
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
