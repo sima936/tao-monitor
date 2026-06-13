@@ -610,7 +610,6 @@ def _drop_forming_bar(
 # ─────────────────────────────────────────────────────────────────────────────
 
 WATCHLIST = [3]            # SN3 Teutonic — always enriched even if not held
-CANDIDATE_BUDGET = 25      # default max subnets to pull real history/Gini for
 CAND_MIN_POOL = 50.0       # TAO — skip illiquid pools when picking candidates
 CAND_MAX_PRICE = 0.10      # TAO — skip very expensive tokens when picking candidates
 
