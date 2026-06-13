@@ -930,12 +930,16 @@ def run(
     real_data_ids = set(targets) | set(holdings)
     eligible_scored = [s for s in result.ranked_by_health if s.subnet_id in real_data_ids]
     append_score_log(result, eligible_scored)   # per-cycle calibration snapshot (gitignored)
+    cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
         account_tao=account_tao,
         current_weight_by_id=current_weight_by_id,
+        cut_since=cut_since_in,                  # OPEN #6 — persistent confirmation streak
+        now_ts=time.time(),
     )
+    prev_state["cut_since"] = {str(k): v for k, v in plan.cut_since.items()}
     logger.info(
         f"Allocation: deploy {plan.deployed_fraction:.0%} · "
         f"{len(plan.positions)} green · {len(plan.cut)} cut · SN0 {plan.sn0_target_weight:.0%}"
