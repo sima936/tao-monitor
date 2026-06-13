@@ -112,6 +112,19 @@ class AllocationPolicy:
     drift_deadband: float = 0.03           # 3% of account
     # Exits (target 0, currently held) ALWAYS act — never deadbanded.
 
+    # ── N-cycle / time confirmation (OPEN #6). A HELD name that would EXIT on a
+    #    gated reason isn't cut on the first flag: it's held at a CV-style toehold
+    #    (de-risked, not zeroed) until the cut-worthy state has persisted for
+    #    `confirm_hours`, then it exits. Time-based (not raw cron count) so the
+    #    filter is cadence-independent — flip the cron to 6h/8h without retuning
+    #    or weakening it (intraday crons read the same daily Markov bar, so raw
+    #    cycle-count confirmation would be diluted; wall-clock isn't).
+    #    Gate engages ONLY for held names (can't "pend an exit" on an un-held
+    #    name) and only when now_ts is supplied (inert on the holdings-less
+    #    /status path → behaves exactly as before).
+    confirm_hours: float = 18.0
+    confirm_gates: frozenset = frozenset({"bear_regime", "health_below_floor"})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
@@ -129,6 +142,8 @@ class TargetPosition:
     drift:          Optional[float] = None # current - target (fraction of account)
     action:         str = "hold"           # enter / add / hold / trim / exit
     capped_by:      Optional[str] = None   # "pool" / "aplus" / None
+    pending_exit:   bool = False           # cut-worthy but inside the confirm window:
+                                           # held at a toehold, not yet zeroed (OPEN #6)
     reason:         str = ""
 
 
@@ -141,6 +156,9 @@ class AllocationPlan:
     positions:         list                # list[TargetPosition], target desc
     cut:               list                # subnets pushed to SN0 (dicts)
     notes:             list = field(default_factory=list)
+    cut_since:         dict = field(default_factory=dict)  # {sid: {"since_ts","reason"}}
+                                           # carried back into prev_state by run() — the
+                                           # persistent confirmation streak (OPEN #6).
 
     def to_dict(self) -> dict:
         return {
@@ -197,6 +215,8 @@ def compute_target_allocation(
     account_tao: Optional[float] = None,                # enables the pool cap (else skipped)
     current_weight_by_id: Optional[dict] = None,        # actual fraction-of-account per subnet → Drift
     sn0_id: int = 0,
+    cut_since: Optional[dict] = None,                   # {sid:{"since_ts","reason"}} from prev_state
+    now_ts: Optional[float] = None,                     # wall-clock epoch; enables time-confirmation
 ) -> AllocationPlan:
     """Derive the target allocation.
 
@@ -233,6 +253,15 @@ def compute_target_allocation(
     suppressed_new = 0
     conviction_floored = 0
 
+    # Time-confirmation state (OPEN #6). Inert when now_ts is absent (e.g. the
+    # holdings-less /status path) → exits act immediately, exactly as before.
+    now = float(now_ts) if now_ts is not None else 0.0
+    gate_active = now_ts is not None       # epoch 0.0 is a valid ts; don't use now>0
+    prior_cut_since = {int(k): v for k, v in (cut_since or {}).items()}
+    new_cut_since: dict[int, dict] = {}
+    pending_meta: dict[int, tuple] = {}   # sid -> (reason, elapsed_hours)
+    pending_count = 0
+
     survivors: list = []
     cut: list[dict] = []
     for s in eligible_scored:
@@ -245,25 +274,48 @@ def compute_target_allocation(
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
         tier = classify_tier(health, s_regime, policy)
-        # Conviction guard: a tagged real-utility vertical cut ONLY on the
-        # marginal health floor (not a confirmed Bear regime) keeps a small
-        # toehold instead of being binned to SN0. Bear-regime cuts still exit.
-        if (tier == Tier.EXIT
-                and sid0 in policy.conviction_tags
-                and not (policy.cut_on_bear_regime and s_regime == "Bear")):
-            tier = Tier.CONVICTION
-            conviction_floored += 1
-        if tier == Tier.EXIT:
-            cut.append({
-                "subnet_id": int(getattr(s, "subnet_id")),
-                "name": getattr(s, "name", ""),
-                "health_score": round(health, 1),
-                "markov_regime": s_regime,
-                "reason": "bear_regime" if (policy.cut_on_bear_regime and s_regime == "Bear")
-                          else "health_below_floor",
-            })
-        else:
+
+        if tier != Tier.EXIT:
             survivors.append((s, tier, health, s_regime))
+            continue  # healthy → not cut-worthy → any prior streak auto-resets
+                      # (simply by not being carried into new_cut_since)
+
+        # ── Cut-worthy. Classify the reason. ──────────────────────────────────
+        is_bear_cut = policy.cut_on_bear_regime and s_regime == "Bear"
+        reason = "bear_regime" if is_bear_cut else "health_below_floor"
+
+        # Conviction guard (unchanged in spirit): a tagged vertical cut ONLY on
+        # the marginal health floor (not a Bear regime) keeps a CV toehold instead
+        # of →SN0. That is a permanent thesis hold, NOT a confirmation window, so
+        # it does not touch cut_since. A tagged name in a real Bear regime falls
+        # through to the time-gate below — and then exits once confirmed.
+        if (sid0 in policy.conviction_tags) and not is_bear_cut:
+            survivors.append((s, Tier.CONVICTION, health, s_regime))
+            conviction_floored += 1
+            continue
+
+        # ── Time-confirmation gate (HELD names only; never creates a position) ─
+        held = held_ids_known and sid0 in held_set
+        if held and gate_active and reason in policy.confirm_gates:
+            since = prior_cut_since.get(sid0, {}).get("since_ts", now)
+            elapsed_h = (now - float(since)) / 3600.0
+            if elapsed_h < policy.confirm_hours:
+                # PENDING: de-risk to a toehold now, confirm before zeroing.
+                new_cut_since[sid0] = {"since_ts": float(since), "reason": reason}
+                pending_meta[sid0] = (reason, elapsed_h)
+                pending_count += 1
+                survivors.append((s, Tier.CONVICTION, health, s_regime))
+                continue
+            # else: persisted ≥ confirm_hours → confirmed → fall through to cut.
+            # Streak not carried forward (the name is leaving the book).
+
+        cut.append({
+            "subnet_id": sid0,
+            "name": getattr(s, "name", ""),
+            "health_score": round(health, 1),
+            "markov_regime": s_regime,
+            "reason": reason,
+        })
 
     # ── Max positions: keep the healthiest N; spill the rest to the cut list ──
     survivors.sort(key=lambda t: t[2], reverse=True)
@@ -322,6 +374,11 @@ def compute_target_allocation(
             cur = None if current_weight_by_id is None else float(current_weight_by_id.get(sid, 0.0))
             drift = None if cur is None else (cur - tw)
             action, reason = _decide_action(cur, tw, drift, policy)
+            is_pending = sid in pending_meta
+            if is_pending:
+                p_reason, p_elapsed = pending_meta[sid]
+                reason = (f"pending exit ({p_reason}) "
+                          f"{p_elapsed:.0f}h/{policy.confirm_hours:.0f}h")
             positions.append(TargetPosition(
                 subnet_id=sid,
                 name=getattr(s, "name", ""),
@@ -333,6 +390,7 @@ def compute_target_allocation(
                 drift=None if drift is None else round(drift, 4),
                 action=action,
                 capped_by=capped_flags.get(sid),
+                pending_exit=is_pending,
                 reason=reason,
             ))
 
@@ -361,6 +419,8 @@ def compute_target_allocation(
         notes.append(f"{regime} macro — new entries suppressed ({suppressed_new} healthy non-held names held back); book limited to current holdings. Rotate in on Bull (see Opportunities).")
     if conviction_floored:
         notes.append(f"{conviction_floored} conviction-tagged vertical(s) floored at CV tier through the health cut — thesis-held at a toehold; would still exit on a Bear-regime flip.")
+    if pending_count:
+        notes.append(f"{pending_count} held name(s) cut-worthy but inside the {policy.confirm_hours:.0f}h confirmation window — de-risked to a toehold (TRIM), full EXIT only once the state persists. Single-cycle blips won't fire a cut.")
 
     return AllocationPlan(
         macro_signal=signal,
@@ -370,6 +430,7 @@ def compute_target_allocation(
         positions=positions,
         cut=cut,
         notes=notes,
+        cut_since=new_cut_since,
     )
 
 
@@ -415,9 +476,10 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
             d = "" if p.drift is None else f" · drift {p.drift:+.0%}"
             act = "" if p.action in ("hold", "target") else f" → {p.action.upper()}"
             cap = f" [{p.capped_by} cap]" if p.capped_by else ""
+            pend = f" ⏳{p.reason}" if p.pending_exit else ""
             lines.append(
                 f"  {p.tier:>2} SN{p.subnet_id} {p.name} — {p.target_weight:.0%}{tao(p.target_weight)}"
-                f" (h{p.health_score:.0f}/{p.markov_regime}){cap}{d}{act}"
+                f" (h{p.health_score:.0f}/{p.markov_regime}){cap}{d}{act}{pend}"
             )
         lines.append("")
     exits = [c for c in plan.cut if c.get("action") == "EXIT"]
