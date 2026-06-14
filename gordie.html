@@ -1120,7 +1120,7 @@ async function loadData() {
   statusText.textContent = 'Scanning...';
 
   try {
-    const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice()]);
+    const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice().catch(() => null)]);
 
     // netuid -> subnet name from the live pools feed (authoritative)
     const nameByNetuid = {};
@@ -1141,8 +1141,8 @@ async function loadData() {
     });
 
     // Price
-    const usd = priceData.bittensor?.usd;
-    const gbp = priceData.bittensor?.gbp;
+    const usd = priceData?.bittensor?.usd;
+    const gbp = priceData?.bittensor?.gbp;
     document.getElementById('tao-price').textContent = usd ? '$' + usd.toFixed(2) : '—';
     document.getElementById('tao-price-gbp').textContent = gbp ? '£' + gbp.toFixed(2) : '—';
 
