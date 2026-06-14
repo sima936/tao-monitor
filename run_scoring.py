@@ -828,10 +828,32 @@ def run(
         )
     except Exception as e:
         logger.error(f"Data fetch failed: {e}")
-        error_msg = f"🔴 TAO MONITOR — Fetch Error\n\n{e}"
+        # We return here BEFORE any save_state / dashboard push, so the last good
+        # state and report stand untouched until the next cycle. The common cause
+        # is a transient upstream blip (read/connect timeout, 5xx, rate-limit) —
+        # so send a calm note, not a raw traceback that looks like a crash.
+        msg = str(e).lower()
+        transient = (
+            isinstance(e, (requests.exceptions.Timeout,
+                           requests.exceptions.ConnectionError))
+            or "timed out" in msg or "timeout" in msg
+            or "connection" in msg or "502" in msg or "503" in msg or "504" in msg
+        )
+        if transient:
+            soft = (
+                "🟡 TAO MONITOR — data source slow\n\n"
+                "Skipped this cycle (upstream timeout). Holding last state — "
+                "no changes made. Will retry next run."
+            )
+        else:
+            soft = (
+                "🟡 TAO MONITOR — cycle skipped\n\n"
+                f"Data fetch error: {type(e).__name__}. Holding last state — "
+                "no changes made. Will retry next run."
+            )
         if telegram_token and telegram_chat:
-            send_telegram(error_msg, telegram_token, telegram_chat)
-        return {"error": str(e)}
+            send_telegram(soft, telegram_token, telegram_chat)
+        return {"error": str(e), "skipped": True}
 
     logger.info(f"Fetched {len(all_metrics)} subnet metrics")
 
