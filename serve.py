@@ -21,6 +21,11 @@ LATEST_SCORE = None
 # Filled by POST /api/ingest-cost-basis, served by GET /api/cost-basis.
 LATEST_COST_BASIS = None
 
+# In-memory cache of the last successful CoinGecko price response (bytes).
+# Lets proxy_price serve a slightly-stale price on a transient upstream blip
+# instead of a 502 — a rate-limit never reaches the browser after first success.
+LATEST_PRICE_BODY = None
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class AuthHandler(http.server.SimpleHTTPRequestHandler):
@@ -116,6 +121,7 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
 
     def proxy_price(self):
+        global LATEST_PRICE_BODY
         try:
             url = 'https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd,gbp'
             headers = {'User-Agent': 'TAO-Monitor/1.0'}
@@ -124,16 +130,28 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
+            LATEST_PRICE_BODY = data  # remember last good
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
-            self.send_response(502)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'error': str(e)}).encode())
+            # Transient CoinGecko hiccup (rate-limit / timeout): serve the last
+            # good price (200, flagged stale) so it never reaches the browser as
+            # a failure. Only 502 on a cold cache (no success yet this process).
+            if LATEST_PRICE_BODY is not None:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('X-Price-Cache', 'stale')
+                self.end_headers()
+                self.wfile.write(LATEST_PRICE_BODY)
+            else:
+                self.send_response(502)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
 
     def proxy_portfolio_stakes(self):
         try:
