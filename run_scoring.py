@@ -939,6 +939,11 @@ def run(
         cut_since=cut_since_in,                  # OPEN #6 — persistent confirmation streak
         now_ts=time.time(),
     )
+    # Persist the updated confirmation streak for the next cron. JSON stringifies
+    # int keys, so they're coerced back to int on load (cut_since_in above).
+    # Only written through to disk on the Telegram path (save_state at end of
+    # run); the read-only --json/dashboard path returns before save and so never
+    # advances the streak clock — correct, it's display-only.
     prev_state["cut_since"] = {str(k): v for k, v in plan.cut_since.items()}
     logger.info(
         f"Allocation: deploy {plan.deployed_fraction:.0%} · "
@@ -1091,7 +1096,19 @@ def main():
     )
 
     if "error" in result:
-        sys.exit(0)
+        logger.warning(f"Run finished with error: {result.get('error')}")
+
+    # Force a clean, immediate process exit. The on-chain holdings fetchers
+    # (--holdings-gini / --holdings-history) open a substrate websocket whose
+    # non-daemon thread blocks normal interpreter termination, leaving the cron
+    # container hung as "Running" long after the report is sent. A bare sys.exit()
+    # won't kill that thread. All side effects (Telegram, /data state via
+    # save_state, dashboard push) are already flushed by the time run() returns,
+    # so an immediate os._exit is safe and resolves the hang regardless of which
+    # thread is lingering. Exit 0 on both paths preserves the prior cron status.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
         
 
 
