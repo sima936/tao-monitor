@@ -1082,6 +1082,8 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
             f"Gini:{gini_str(s.genie_score_raw)}{conc_tag(s.genie_score_raw)}"
         )
     for h in holdings:
+        if h == 0:
+            continue  # SN0 = legacy root dust / the sink concept, not a tradeable holding
         if h in filtered_by_id:
             ff = filtered_by_id[h]
             L.append(f"  SN{h} {ff['name']} [--]  ⛔ {ff['reason']}")
@@ -1127,6 +1129,8 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
     # 3. Review / exit — failed filters + downtrend/bear on holdings.
     exits = []
     for h in holdings:
+        if h == 0:
+            continue  # SN0 is the cash sink, never a review/exit candidate
         if h in filtered_by_id:
             exits.append(f"  SN{h} {filtered_by_id[h]['name']} — {filtered_by_id[h]['reason']}")
     for s in held_scores:
