@@ -11,6 +11,7 @@ USERNAME = os.environ.get('DASHBOARD_USER', 'tao')
 PASSWORD = os.environ.get('DASHBOARD_PASS', 'bittensor')
 TAOSTATS_KEY = os.environ.get('TAOSTATS_API_KEY', '')
 SCORE_INGEST_TOKEN = os.environ.get('SCORE_INGEST_TOKEN', '')
+COINGECKO_KEY = os.environ.get('COINGECKO_API_KEY', '')
 
 # In-memory cache of the cron's last v4 scoring JSON (Railway has no shared disk).
 # Filled by POST /api/ingest-score, served by GET /api/score.
@@ -117,7 +118,10 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
     def proxy_price(self):
         try:
             url = 'https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd,gbp'
-            req = urllib.request.Request(url, headers={'User-Agent': 'TAO-Monitor/1.0'})
+            headers = {'User-Agent': 'TAO-Monitor/1.0'}
+            if COINGECKO_KEY:
+                headers['x-cg-demo-api-key'] = COINGECKO_KEY
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
             self.send_response(200)
