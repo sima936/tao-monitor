@@ -322,6 +322,14 @@ tr:hover { background: rgba(240,185,11,0.03); }
 .drift-warn { color: var(--warn); }
 .drift-danger { color: var(--red); }
 
+/* Profit / Loss from entry — break-even axis at centre, green right / red left. */
+.pnl-bar-row { display: flex; align-items: center; margin-bottom: 0.5rem; gap: 0.5rem; }
+.pnl-track { flex: 1; height: 14px; background: var(--surface2); border-radius: 3px; position: relative; overflow: hidden; }
+.pnl-fill { position: absolute; top: 0; bottom: 0; border-radius: 2px; transition: width 0.6s ease, left 0.6s ease; }
+.pnl-breakeven { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: var(--muted); z-index: 3; transform: translateX(-50%); }
+.pnl-val { width: 56px; text-align: right; font-size: 0.7rem; font-weight: 600; }
+.pnl-mom { width: 170px; text-align: right; font-size: 0.62rem; color: var(--muted); white-space: nowrap; }
+
 footer {
   margin-top: 2rem;
   padding-top: 1rem;
@@ -468,6 +476,9 @@ footer {
         <tr><td colspan="9" class="loading"><span class="spinner"></span>Fetching from chain...</td></tr>
       </tbody>
     </table>
+    <div class="section-title" style="margin-top:1.5rem">Profit / Loss From Entry</div>
+    <div style="font-size:0.62rem;color:var(--muted);margin-bottom:0.5rem">Grey line = break-even (your cost basis). Green right = in profit since entry · red left = underwater. Scale ±60%. Right column = 24h · 7d · Markov regime, for quick advisory confirmation.</div>
+    <div id="pnl-chart" style="padding:0.5rem 0"></div>
     <div class="section-title" style="margin-top:1.5rem">Allocation Chart</div>
     <div id="alloc-chart" style="padding:0.5rem 0"></div>
   </div>
@@ -553,13 +564,14 @@ footer {
           <th data-sort="pct_day">24H%</th>
           <th data-sort="pct_week">7D%</th>
           <th data-sort="pct_month">30D%</th>
+          <th>Trend 30d</th>
           <th data-sort="pool_depth">Pool (τ)</th>
           <th>Status</th>
           <th data-sort="reason">Reason</th>
         </tr>
       </thead>
       <tbody id="all-subnets-body">
-        <tr><td colspan="9" class="loading"><span class="spinner"></span>Scanning...</td></tr>
+        <tr><td colspan="10" class="loading"><span class="spinner"></span>Scanning...</td></tr>
       </tbody>
     </table>
   </div>
@@ -911,6 +923,27 @@ function renderOpportunities(score) {
   tbody.innerHTML = html;
 }
 
+// Coarse trend sparkline from the change figures already on the row: 4 real
+// anchor points (30d / 7d / 1d / now), time-spaced. NOT a daily series — a true
+// smooth sparkline needs the cron to emit the daily price window.
+function trendSpark(m) {
+  const now = m.price;
+  if (now == null || !isFinite(now)) return '<span class="pct-neutral" style="font-size:0.6rem">—</span>';
+  const back = p => (p == null || !isFinite(p)) ? null : now / (1 + p / 100);
+  const anchors = [[30, back(m.pct_month)], [7, back(m.pct_week)], [1, back(m.pct_day)], [0, now]]
+    .filter(a => a[1] != null && isFinite(a[1]) && a[1] > 0);
+  if (anchors.length < 2) return '<span class="pct-neutral" style="font-size:0.6rem">—</span>';
+  const W = 64, H = 16, pad = 2;
+  const ys = anchors.map(a => a[1]);
+  const min = Math.min(...ys), max = Math.max(...ys), span = (max - min) || 1;
+  const X = d => pad + (30 - d) / 30 * (W - 2 * pad);
+  const Y = v => H - pad - (v - min) / span * (H - 2 * pad);
+  const path = anchors.map((a, i) => `${i ? 'L' : 'M'}${X(a[0]).toFixed(1)},${Y(a[1]).toFixed(1)}`).join(' ');
+  const up = anchors[anchors.length - 1][1] >= anchors[0][1];
+  const col = up ? 'var(--green)' : 'var(--red)';
+  return `<svg width="${W}" height="${H}" style="vertical-align:middle" aria-label="30d trend"><path d="${path}" fill="none" stroke="${col}" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
+}
+
 function renderAllSubnets(results) {
   const tbody = document.getElementById('all-subnets-body');
   const sorted = [...results].sort((a, b) => {
@@ -935,6 +968,7 @@ function renderAllSubnets(results) {
       <td>${pctCell(m.pct_day)}</td>
       <td>${pctCell(m.pct_week)}</td>
       <td>${pctCell(m.pct_month)}</td>
+      <td>${trendSpark(m)}</td>
       <td>${m.pool_depth ? m.pool_depth.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</td>
       <td>${statusTag(r.passed, r.reason)}</td>
       <td style="font-size:0.6rem;color:var(--muted)">${r.passed ? '' : r.reason}</td>
@@ -1006,6 +1040,13 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
     (alloc.cut || []).forEach(c => { if (!(c.subnet_id in targetPctByNetuid)) targetPctByNetuid[c.subnet_id] = 0; });
   }
 
+  // Per-netuid momentum from the cron feed, for the advisory-confirmation strip
+  // on each P&L row (24h · 7d · Markov regime). No new data dependency.
+  const momByNetuid = {};
+  if (score && Array.isArray(score.ranked)) {
+    score.ranked.forEach(r => { momByNetuid[r.subnet_id] = r; });
+  }
+
   const positions = (stakeData.data || [])
     .filter(s => {
       const tao = parseInt(s.balance_as_tao || '0') / 1e9;
@@ -1060,6 +1101,7 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
 
   let html = '';
   let allocHtml = '';
+  let pnlHtml = '';
   positions.forEach((p, i) => {
     const valGbp = p.tao * gbp;
     const actualPct = totalTao > 0 ? (p.tao / totalTao) * 100 : 0;
@@ -1095,6 +1137,42 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
       </div>
       <div class="alloc-pct">${actualPct.toFixed(1)}%</div>
     </div>`;
+
+    // P&L-from-entry bar: break-even at centre, green right = profit, red left = loss.
+    const PNL_SCALE = 60; // ±60% maps to a full half-track
+    // Advisory-confirmation read from the cron feed: 24h · 7d · Markov regime.
+    const mom = momByNetuid[p.netuid];
+    const d24 = (mom && mom.pct_change_24h != null) ? mom.pct_change_24h * 100 : null;
+    const d7  = (mom && mom.pct_change_7d  != null) ? mom.pct_change_7d  * 100 : null;
+    const reg = (mom && mom.markov_available) ? (mom.markov_regime || '—') : 'n/a';
+    const tf = (v) => v == null ? '<span class="pct-neutral">·</span>'
+      : `<span class="${v > 0 ? 'pct-positive' : v < 0 ? 'pct-negative' : 'pct-neutral'}">${v > 0 ? '+' : ''}${v.toFixed(0)}%</span>`;
+    const regCls = reg === 'Bull' ? 'pct-positive' : reg === 'Bear' ? 'pct-negative' : 'pct-neutral';
+    const momStrip = `24h ${tf(d24)} · 7d ${tf(d7)} · <span class="${regCls}">${reg}</span>`;
+    if (pnlPct == null) {
+      pnlHtml += `<div class="pnl-bar-row">
+        <div class="alloc-label">SN${p.netuid} ${p.name}</div>
+        <div class="pnl-track"><div class="pnl-breakeven"></div></div>
+        <div class="pnl-val pct-neutral">—</div>
+        <div class="pnl-mom">${momStrip}</div>
+      </div>`;
+    } else {
+      const mag = Math.min(Math.abs(pnlPct) / PNL_SCALE * 50, 50);
+      const isPos = pnlPct >= 0;
+      const fillStyle = isPos
+        ? `left:50%;width:${mag}%;background:var(--green)`
+        : `left:${50 - mag}%;width:${mag}%;background:var(--red)`;
+      const valCls = isPos ? 'pct-positive' : 'pct-negative';
+      pnlHtml += `<div class="pnl-bar-row">
+        <div class="alloc-label">SN${p.netuid} ${p.name}</div>
+        <div class="pnl-track">
+          <div class="pnl-fill" style="${fillStyle}"></div>
+          <div class="pnl-breakeven"></div>
+        </div>
+        <div class="pnl-val ${valCls}">${isPos ? '+' : ''}${pnlPct.toFixed(1)}%</div>
+        <div class="pnl-mom">${momStrip}</div>
+      </div>`;
+    }
   });
 
   // Total row
@@ -1110,6 +1188,7 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
 
   tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center">No positions found</td></tr>';
   document.getElementById('alloc-chart').innerHTML = allocHtml;
+  document.getElementById('pnl-chart').innerHTML = pnlHtml;
 }
 
 // ── Main Load ───────────────────────────────────────────────────────────────
