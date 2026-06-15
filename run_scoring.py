@@ -975,6 +975,23 @@ def run(
         prev_state["peak_price"] = {str(k): v for k, v in peak_out.items()}
         prev_state["stop_fired"] = {str(k): v for k, v in fired_out.items()}
         force_exit = {e["netuid"]: e["event_type"].lower() for e in stop_events}
+        # LS19 #1 — surface peak/latch state EVERY cycle (SA console is empty
+        # between runs; this lands in the Deployments log). Confirms trailing-
+        # stop peaks persist + build over cycles, and shows the stop_fired latch
+        # per held name. Hard stop is live cycle-one; trailing builds gradually.
+        if peak_out:
+            logger.info(
+                "TP/CL state | peaks=%d latched=%d | %s",
+                len(peak_out), len(fired_out),
+                " ".join(
+                    f"SN{nid}={price_by_id.get(nid, 0.0):.6f}/pk{pk:.6f}"
+                    f"({(price_by_id.get(nid, 0.0) / pk - 1) * 100:+.1f}%"
+                    f"{',FIRED:' + str(fired_out[nid]) if nid in fired_out else ''})"
+                    for nid, pk in sorted(peak_out.items()) if pk
+                ),
+            )
+        else:
+            logger.info("TP/CL state | no peaks yet (seeding at this cycle's prices)")
         if stop_events:
             append_outcome_log(stop_events)
             logger.warning("STOPS FIRED: " + " | ".join(
