@@ -69,14 +69,14 @@ TIER_WEIGHT = {Tier.APLUS: 4.0, Tier.A: 2.0, Tier.B: 1.0, Tier.CONVICTION: 0.5, 
 class AllocationPolicy:
     # ── Axis 1: the dial. (signal_floor, deployed_fraction), highest floor first.
     #    deployed_fraction is the % of the WHOLE account that is live (rest → SN0).
+    #    No macro cash dial: SN0 is the residual parking spot for cuts with
+    #    nowhere to rotate, not a fixed target. Always fully deployed; the
+    #    cross-section (cut reds, no new entries off-Bull) decides how much
+    #    actually lands in green — the rest falls to SN0 on its own.
     deploy_bands: tuple = (
-        ( 0.40, 1.00),   # strong bull  → fully deployed
-        ( 0.10, 0.80),   # bull
-        (-0.10, 0.50),   # sideways
-        (-0.40, 0.25),   # mild bear
-        (-9.99, 0.15),   # deep bear (catch-all) → small green book, rest SN0
+        (-9.99, 1.00),   # always fully deployed; SN0 = residual only
     )
-    unknown_macro_fraction: float = 0.25   # macro unavailable → conservative
+    unknown_macro_fraction: float = 1.00   # macro unavailable → still fully deployed
 
     # ── Axis 2: tiering off health_score.
     health_aplus: float = 70.0
