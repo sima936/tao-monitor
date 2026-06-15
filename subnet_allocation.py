@@ -217,6 +217,7 @@ def compute_target_allocation(
     sn0_id: int = 0,
     cut_since: Optional[dict] = None,                   # {sid:{"since_ts","reason"}} from prev_state
     now_ts: Optional[float] = None,                     # wall-clock epoch; enables time-confirmation
+    force_exit: Optional[dict] = None,                  # {sid: "trail_stop"/"hard_stop"} — STEP 2 stop override
 ) -> AllocationPlan:
     """Derive the target allocation.
 
@@ -230,6 +231,8 @@ def compute_target_allocation(
     """
     policy = policy or AllocationPolicy()
     notes: list[str] = []
+    force_exit = {int(k): str(v) for k, v in (force_exit or {}).items()}
+    forced_conviction_exits: list[tuple] = []
 
     macro_available = getattr(macro, "available", True)
     signal = float(getattr(macro, "signal", 0.0) or 0.0)
@@ -268,6 +271,19 @@ def compute_target_allocation(
         sid0 = int(getattr(s, "subnet_id"))
         if sid0 == sn0_id:
             continue  # SN0 is the sink, never a holding
+        # ── STEP 2: a fired trailing/hard stop is a same-cycle hard exit. It
+        #    overrides the conviction floor AND the 18h confirm gate — a full
+        #    exit (→SN0), not a toehold, not pending. Stops are only ever set
+        #    for held names, so this never creates/zeroes an un-held subnet. ──
+        if sid0 in force_exit:
+            _h = round(float(getattr(s, "health_score", 0.0)), 1)
+            _r = str(getattr(s, "markov_regime", "Unknown"))
+            cut.append({"subnet_id": sid0, "name": getattr(s, "name", ""),
+                        "health_score": _h, "markov_regime": _r,
+                        "reason": force_exit[sid0]})
+            if sid0 in policy.conviction_tags:
+                forced_conviction_exits.append((sid0, getattr(s, "name", ""), force_exit[sid0]))
+            continue
         if held_ids_known and not allow_new_entries and sid0 not in held_set:
             suppressed_new += 1
             continue  # non-Bull macro → no new exposure; leave discovery to Opportunities
@@ -419,6 +435,10 @@ def compute_target_allocation(
         notes.append(f"{regime} macro — new entries suppressed ({suppressed_new} healthy non-held names held back); book limited to current holdings. Rotate in on Bull (see Opportunities).")
     if conviction_floored:
         notes.append(f"{conviction_floored} conviction-tagged vertical(s) floored at CV tier through the health cut — thesis-held at a toehold; would still exit on a Bear-regime flip.")
+    if forced_conviction_exits:
+        _names = ", ".join(f"SN{sid} {nm}" for sid, nm, _ in forced_conviction_exits)
+        notes.append(f"⚠️ Conviction name(s) hit a stop — thesis check required: {_names}. "
+                     f"Stop overrides the conviction floor; exited, not silently held.")
     if pending_count:
         notes.append(f"{pending_count} held name(s) cut-worthy but inside the {policy.confirm_hours:.0f}h confirmation window — de-risked to a toehold (TRIM), full EXIT only once the state persists. Single-cycle blips won't fire a cut.")
 
