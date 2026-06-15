@@ -975,6 +975,14 @@ def run(
         prev_state["peak_price"] = {str(k): v for k, v in peak_out.items()}
         prev_state["stop_fired"] = {str(k): v for k, v in fired_out.items()}
         force_exit = {e["netuid"]: e["event_type"].lower() for e in stop_events}
+        # The de-dup latch suppresses the repeat ALERT, but the EXIT directive
+        # must persist every cycle a breach still stands — else a hard-stopped
+        # name (MANTIS) floats straight back to its conviction floor next cycle,
+        # silently held, violating "exited, not silently held". fired_out holds
+        # every standing breach (new + latched; clears on recovery), so keep
+        # forcing the exit for all of them. Alert/outcome-log stay de-duped.
+        for _nid, _ev in fired_out.items():
+            force_exit.setdefault(_nid, str(_ev).lower())
         # LS19 #1 — surface peak/latch state EVERY cycle (SA console is empty
         # between runs; this lands in the Deployments log). Confirms trailing-
         # stop peaks persist + build over cycles, and shows the stop_fired latch
