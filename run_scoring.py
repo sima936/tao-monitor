@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 import requests
 
 from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis
+from tp_cl_stops import evaluate_stops, append_outcome_log, format_stop_alert, TRAIL_PCT, STOP_PCT
 from subnet_scoring_engine import (
     run_scoring_cycle,
     format_telegram_alert,
@@ -927,6 +928,7 @@ def run(
     # serve.py is single-threaded and must never block on a multi-page fetch.
     # Also yields the real P&L gate for the Telegram trim section.
     pnl_by_netuid = None
+    cb = None
     bal_by_netuid = prefetched_balances        # threaded from main's on-chain holdings resolve
     if cost_basis:
         try:
@@ -952,6 +954,34 @@ def run(
     real_data_ids = set(targets) | set(holdings)
     eligible_scored = [s for s in result.ranked_by_health if s.subnet_id in real_data_ids]
     append_score_log(result, eligible_scored)   # per-cycle calibration snapshot (gitignored)
+
+    # ── TP/CL stops — evaluate BEFORE allocation so a fired stop forces a
+    #    same-cycle full exit, overriding the conviction floor + 18h gate.
+    #    Advisory: 🚨 ping + outcome-log row, no auto-unstake. Cron path only. ──
+    force_exit: dict[int, str] = {}
+    if cost_basis:
+        price_by_id  = {s.subnet_id: float(s.token_price) for s in eligible_scored if s.token_price}
+        name_by_id   = {s.subnet_id: s.name for s in eligible_scored}
+        regime_by_id = {s.subnet_id: s.markov_regime for s in eligible_scored}
+        health_by_id = {s.subnet_id: float(s.health_score) for s in eligible_scored}
+        cost_by_id   = {int(k): float(v.get("tao_invested", 0) or 0)
+                        for k, v in ((cb or {}).get("positions", {}) or {}).items()}
+        stop_events, peak_out, fired_out = evaluate_stops(
+            holdings, price_by_id, (bal_by_netuid or {}), cost_by_id,
+            pnl_by_netuid, regime_by_id, health_by_id, name_by_id,
+            prev_state.get("peak_price") or {}, prev_state.get("stop_fired") or {},
+            trail_pct=TRAIL_PCT, stop_pct=STOP_PCT, now_ts=time.time(),
+        )
+        prev_state["peak_price"] = {str(k): v for k, v in peak_out.items()}
+        prev_state["stop_fired"] = {str(k): v for k, v in fired_out.items()}
+        force_exit = {e["netuid"]: e["event_type"].lower() for e in stop_events}
+        if stop_events:
+            append_outcome_log(stop_events)
+            logger.warning("STOPS FIRED: " + " | ".join(
+                f"SN{e['netuid']} {e['event_type']}" for e in stop_events))
+            if telegram_token and telegram_chat:
+                send_telegram(format_stop_alert(stop_events), telegram_token, telegram_chat)
+
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
@@ -960,6 +990,7 @@ def run(
         current_weight_by_id=current_weight_by_id,
         cut_since=cut_since_in,                  # OPEN #6 — persistent confirmation streak
         now_ts=time.time(),
+        force_exit=force_exit,                   # STEP 2 — stops override floor + gate
     )
     # Persist the updated confirmation streak for the next cron. JSON stringifies
     # int keys, so they're coerced back to int on load (cut_since_in above).
