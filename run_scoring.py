@@ -1116,21 +1116,45 @@ def main():
         sys.exit(1)
 
     prefetched_balances = None
+    wallet_read_failed = False
     if args.holdings:
         holdings = [int(x.strip()) for x in args.holdings.split(",")]
     else:
-        # No explicit holdings (bare cron) — resolve on-chain so the report never
-        # drifts from /status. Capture balances from the SAME call so the P&L gate
-        # and the allocator reuse them (one get_wallet_stakes per cycle; #5 de-dup).
+        # No explicit holdings (bare cron) — resolve on-chain. The wallet read is
+        # the SOURCE OF TRUTH for which subnets we hold. If it fails OR returns
+        # empty we must NOT compute the cycle on the stale CURRENT_HOLDINGS list:
+        # that resurrects exited names (e.g. NIOME) into the report AND into the
+        # stop/allocation logic. Treat a failed/empty read like the transient
+        # data-fetch path — hold last state, skip the cycle, send a calm note.
         try:
             from taostats_fetch import TaostatsClient
             _c = TaostatsClient(api_key=args.api_key, rate_limit_delay=0.5)
             prefetched_balances = parse_stake_balances(_c.get_wallet_stakes())
-            holdings = sorted(prefetched_balances) or CURRENT_HOLDINGS
-            logger.info(f"Wallet holdings from chain: {holdings} ({len(holdings)} subnets)")
         except Exception as e:
-            logger.warning(f"On-chain holdings fetch failed ({e}) — using fallback")
-            holdings = CURRENT_HOLDINGS
+            logger.warning(f"On-chain holdings fetch failed ({e})")
+            prefetched_balances = {}
+        if prefetched_balances:
+            holdings = sorted(prefetched_balances)
+            logger.info(f"Wallet holdings from chain: {holdings} ({len(holdings)} subnets)")
+        else:
+            wallet_read_failed = True
+            holdings = CURRENT_HOLDINGS  # unused — we skip below; kept to avoid unbound var
+
+    if wallet_read_failed:
+        logger.warning(
+            "Wallet read empty/failed — holding last state, skipping cycle "
+            "(no phantom-book compute on stale CURRENT_HOLDINGS)."
+        )
+        if args.telegram_token and args.telegram_chat:
+            send_telegram(
+                "\U0001f7e1 TAO MONITOR — wallet read unavailable\n\n"
+                "Couldn't read your on-chain positions this cycle (taostats blip). "
+                "Holding last state — no scoring, no stops, no changes. Will retry next run.",
+                args.telegram_token, args.telegram_chat,
+            )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     result = run(
         api_key=args.api_key,
