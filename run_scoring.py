@@ -315,7 +315,7 @@ def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
             bal = float(entry.get("balance_as_tao"))
         except (TypeError, ValueError):
             continue
-        out[int(nid)] = bal / 1e9
+        out[int(nid)] = out.get(int(nid), 0.0) + bal / 1e9  # += multi-hotkey safe (LS20 #4)
     return out
 
 
@@ -695,10 +695,33 @@ def compute_tao_macro_inline(years: int = 1) -> dict | None:
         return None
 
     try:
+        # Markov-2 FIX-1: phase-averaged non-overlap stride de-inflates the
+        # autocorrelated persistence diagonal. The matrix becomes ~window-ahead;
+        # the macro reads only current_regime + signal (a directional bias), so
+        # window-ahead semantics are correct for a slow macro overlay.
         r = analyze(close, source="TAO-inline",
                     window=TAO_WINDOW, threshold=TAO_THRESHOLD,
-                    min_train=60, hmm=False)
-        logger.info(f"Inline macro: {r['current_regime']} (signal {r['signal']:+.3f})")
+                    min_train=60, hmm=False,
+                    stickiness_mode="nonoverlap")
+        # Shadow log: legacy adjacent signal alongside the corrected one, so we
+        # can watch divergence on real TAO before fully trusting the switch.
+        # Cheap — reuses labels, no second walk-forward backtest.
+        try:
+            from markov_regime import (label_regimes, build_transition_matrix,
+                                        signal_from_matrix)
+            _lab = label_regimes(close, window=TAO_WINDOW, threshold=TAO_THRESHOLD)
+            _cur = int(_lab.iloc[-1])
+            _P_adj = build_transition_matrix(_lab, mode="adjacent", window=TAO_WINDOW)
+            r["signal_legacy"] = float(signal_from_matrix(_P_adj, _cur))
+        except Exception as e:
+            logger.warning(f"Inline macro shadow-signal failed (non-fatal): {e}")
+            r["signal_legacy"] = None
+        _leg = r.get("signal_legacy")
+        _leg_s = f"{_leg:+.3f}" if _leg is not None else "n/a"
+        logger.info(
+            f"Inline macro: {r['current_regime']} "
+            f"(signal {r['signal']:+.3f} [nonoverlap] | legacy {_leg_s} [adjacent])"
+        )
         return r
     except Exception as e:
         logger.warning(f"Inline macro analyze failed: {e}")
