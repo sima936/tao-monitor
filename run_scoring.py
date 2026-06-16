@@ -43,6 +43,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime, timezone
@@ -917,28 +918,41 @@ def run(
     # FALLBACK: taostats pool/history only for subnets GT didn't return (new pools).
     # Same {netuid: (closes, timestamps)} contract → drops into apply_history_overrides.
     if holdings_history:
-        gt_hist = fetch_history_for_netuids(targets)
-        missing = [n for n in targets if n != 0 and n not in gt_hist]
-        ts_hist = fetch_holdings_history(client, missing) if missing else {}
-        history = {**ts_hist, **gt_hist}  # GT wins on any overlap
-        # Drop today's still-forming UTC-day bar so regime/EMA/7d use CLOSED
-        # days only — kills the intraday / midnight-roll whipsaw.
-        _trimmed = 0
-        _clean = {}
-        for _n, (_p, _t) in history.items():
-            _p2, _t2 = _drop_forming_bar(_p, _t)
-            if len(_p2) != len(_p):
-                _trimmed += 1
-            _clean[_n] = (_p2, _t2)
-        history = _clean
-        all_metrics = apply_history_overrides(all_metrics, history)
-        logger.info(
-            f"Closed-bar trim: dropped today's forming bar on {_trimmed}/{len(history)} series"
-        )
-        logger.info(
-            f"Real history: {len(gt_hist)} from GeckoTerminal, "
-            f"{len(ts_hist)} from taostats fallback ({len(missing)} not on GT)"
-        )
+        # Real-history enrichment is the most upstream-exposed step after the
+        # main fetch: GeckoTerminal (its own rate limit / JSON shape) plus the
+        # taostats pool/history fallback. An unhandled throw here was a silent
+        # hard crash — the cycle died before the dashboard push and the Telegram
+        # send, taking the whole report dark with no notification. Make it
+        # non-fatal: on any failure keep the existing (synthetic / last-good)
+        # bars and continue, so regime/EMA/7d degrade to the prior series rather
+        # than killing the run. The backstop in main() catches anything past this.
+        try:
+            gt_hist = fetch_history_for_netuids(targets)
+            missing = [n for n in targets if n != 0 and n not in gt_hist]
+            ts_hist = fetch_holdings_history(client, missing) if missing else {}
+            history = {**ts_hist, **gt_hist}  # GT wins on any overlap
+            # Drop today's still-forming UTC-day bar so regime/EMA/7d use CLOSED
+            # days only — kills the intraday / midnight-roll whipsaw.
+            _trimmed = 0
+            _clean = {}
+            for _n, (_p, _t) in history.items():
+                _p2, _t2 = _drop_forming_bar(_p, _t)
+                if len(_p2) != len(_p):
+                    _trimmed += 1
+                _clean[_n] = (_p2, _t2)
+            history = _clean
+            all_metrics = apply_history_overrides(all_metrics, history)
+            logger.info(
+                f"Closed-bar trim: dropped today's forming bar on {_trimmed}/{len(history)} series"
+            )
+            logger.info(
+                f"Real history: {len(gt_hist)} from GeckoTerminal, "
+                f"{len(ts_hist)} from taostats fallback ({len(missing)} not on GT)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Real-history enrichment failed (non-fatal, keeping existing bars): {e}"
+            )
 
     # Convert macro dict → TaoMacroState for scoring engine
     macro_state = macro_dict_to_state(macro)
@@ -1204,21 +1218,45 @@ def main():
         sys.stderr.flush()
         os._exit(0)
 
-    result = run(
-        api_key=args.api_key,
-        telegram_token=args.telegram_token,
-        telegram_chat=args.telegram_chat,
-        output_json=args.json,
-        fetch_concentration=not args.no_concentration,
-        holdings=holdings,
-        top_n=args.top_n,
-        force_send=args.force_send,
-        holdings_gini=args.holdings_gini,
-        holdings_history=args.holdings_history,
-        candidate_budget=args.candidates,
-        cost_basis=args.cost_basis,
-        prefetched_balances=prefetched_balances,
-    )
+    try:
+        result = run(
+            api_key=args.api_key,
+            telegram_token=args.telegram_token,
+            telegram_chat=args.telegram_chat,
+            output_json=args.json,
+            fetch_concentration=not args.no_concentration,
+            holdings=holdings,
+            top_n=args.top_n,
+            force_send=args.force_send,
+            holdings_gini=args.holdings_gini,
+            holdings_history=args.holdings_history,
+            candidate_budget=args.candidates,
+            cost_basis=args.cost_basis,
+            prefetched_balances=prefetched_balances,
+        )
+    except Exception as e:
+        # BACKSTOP — last line of defence against a silent dark cycle. Every
+        # step inside run() that can reasonably degrade already does (data-fetch
+        # → soft note + skip; cost-basis → non-fatal; history → keep existing
+        # bars). This catches anything that slips past those — an unhandled
+        # throw in scoring, stops, or allocation that would otherwise kill the
+        # process before the dashboard push and Telegram send, leaving no digest
+        # and a stale dashboard with no explanation (exactly the 23:00 failure).
+        # We can't know how far the dashboard push got, so we DON'T touch it —
+        # we only guarantee a notification fires, then fall through to the clean
+        # os._exit(0) below so the cron status stays green and the next
+        # scheduled run proceeds normally.
+        logger.error(f"Unhandled error in run() — alerting, holding last state: {e}")
+        logger.error(traceback.format_exc())
+        if args.telegram_token and args.telegram_chat:
+            send_telegram(
+                "\U0001f534 TAO MONITOR — cycle crashed\n\n"
+                f"Unhandled error this cycle ({type(e).__name__}). Held last "
+                "state — no changes made. Dashboard may show the previous run "
+                "until the next cycle. Will retry next run.",
+                args.telegram_token, args.telegram_chat,
+            )
+        result = {"error": str(e), "skipped": True}
 
     if "error" in result:
         logger.warning(f"Run finished with error: {result.get('error')}")
