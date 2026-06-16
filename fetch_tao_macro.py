@@ -56,13 +56,20 @@ def main():
         return
 
     try:
+        # Align fallback tuning to the live inline path's single source of
+        # truth (TAO_WINDOW/TAO_THRESHOLD); literals are a safety net only.
+        try:
+            from subnet_scoring_engine import TAO_WINDOW as _W, TAO_THRESHOLD as _T
+        except Exception:
+            _W, _T = 14, 0.07
         result = analyze(
             close,
             source=TICKER,
-            window=20,
-            threshold=0.05,
+            window=_W,
+            threshold=_T,
             min_train=60,
             hmm=False,
+            stickiness_mode="nonoverlap",  # Markov-2 FIX-1, match inline path
         )
         OUTPUT_PATH.write_text(json.dumps(result, indent=2))
         regime = result["current_regime"]
