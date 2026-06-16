@@ -773,12 +773,13 @@ def score_subnet(
 
     # NOTE: macro is single-counted by design. It enters entry_score once, via
     # p2_macro (ENTRY_W weight 0.15). The old blunt post-composite multiplier
-    # (entry_score *= 0.3/0.5/0.7 by regime) has been REMOVED — gross-exposure
-    # suppression now lives at the allocation layer (subnet_allocation.py Axis-1
-    # "dial": macro.signal → deployed fraction, rest parked in SN0), and new-entry
+    # (entry_score *= 0.3/0.5/0.7 by regime) has been REMOVED. New-entry
     # suppression is enforced by the digest BUY gate + new_entries_only_in_bull.
-    # Multiplying here as well triple-counted the macro and squashed the displayed
-    # entry numbers without changing rank (the multiplier was uniform per regime).
+    # NOTE 2 (LS20/LS22): the former Axis-1 gross-exposure "dial" in
+    # subnet_allocation.py is NEUTERED — deploy_bands=((-9.99,1.00),) returns
+    # 100% for any signal, so macro.signal no longer moves exposure (SN0 holds
+    # only residual cut-overflow). macro.signal now only nudges Bull buy-ranking
+    # via macro_factor, plus display.
 
     return SubnetScore(
         subnet_id=metrics.subnet_id,
