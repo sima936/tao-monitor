@@ -170,15 +170,79 @@ def label_regimes(
     return labels.loc[rolling_return.notna()]
 
 
-def build_transition_matrix(labels: pd.Series) -> np.ndarray:
-    """MLE estimate of the 3x3 transition matrix by counting transitions."""
+def build_transition_matrix(
+    labels: pd.Series,
+    *,
+    mode: str = "adjacent",
+    window: int = DEFAULT_WINDOW,
+) -> np.ndarray:
+    """MLE estimate of the 3x3 transition matrix by counting transitions.
+
+    mode="adjacent" (default — original behaviour, kept so nothing that
+        already consumes this changes silently): count every consecutive
+        day-to-day transition label[t] -> label[t+1]. Because each label is a
+        trailing `window`-day return, two adjacent days share window-1 of those
+        days, so day-to-day "transitions" are autocorrelated by construction.
+        That inflates the persistence diagonal (Bull->Bull, Bear->Bear, ...) —
+        the "weigh yourself daily and conclude you're stable" artefact.
+
+    mode="nonoverlap" (Markov-2 stickiness fix from the Fable-5 video): only
+        compare windows that do NOT overlap, i.e. count label[t] -> label[t+window].
+        The two `window`-day windows being compared then share zero days, so the
+        artificial stickiness is removed and the diagonal de-inflates.
+        IMPORTANT semantic consequence: this makes the matrix a ONE-WINDOW-ahead
+        (≈`window` trading-day) transition matrix, not a one-DAY-ahead one. If you
+        adopt it as the *trading* step, the signal, the n-step forecast, and the
+        backtest holding period must all be read in window units — that's a
+        deliberate change, not a drop-in (see walk_forward_backtest's note).
+    """
+    if mode == "adjacent":
+        step = 1
+    elif mode == "nonoverlap":
+        step = max(int(window), 1)
+    else:
+        raise ValueError(f"unknown mode {mode!r}; use 'adjacent' or 'nonoverlap'")
     counts = np.zeros((3, 3), dtype=float)
     arr = np.asarray(labels, dtype=int)
-    for i in range(len(arr) - 1):
-        counts[arr[i], arr[i + 1]] += 1.0
+    for i in range(len(arr) - step):
+        counts[arr[i], arr[i + step]] += 1.0
     row_sums = counts.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1.0  # empty row -> stay put / no info
     return counts / row_sums
+
+
+def verify_label_mapping(
+    labels: pd.Series,
+    rolling_return: pd.Series,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> None:
+    """Markov-2 FIX-2: guard against a swapped state-index <-> name mapping.
+
+    The Pine v2 sibling ships Bull=1/Bear=2/Side=0; this module ships
+    Bear=0/Side=1/Bull=2 (STATES). The two encodings differ, so a careless
+    port between them can swap states silently. This asserts the invariant the
+    same way the Pine runtime check does: the bar with the strongest positive
+    window-return, once it clears +threshold, MUST be Bull (2); the strongest
+    negative, once it clears -threshold, MUST be Bear (0). Raises on violation
+    so a swapped mapping can never reach a live signal. Passes silently when the
+    mapping is correct (which it currently is).
+    """
+    rr = rolling_return.reindex(labels.index).dropna()
+    if rr.empty:
+        return
+    imax, imin = rr.idxmax(), rr.idxmin()
+    if rr.loc[imax] > threshold and STATES[int(labels.loc[imax])] != "Bull":
+        raise RuntimeError(
+            "FIX-2: strongest +window labelled "
+            f"{STATES[int(labels.loc[imax])]}, expected Bull — state indices "
+            "are swapped; refusing to emit a signal."
+        )
+    if rr.loc[imin] < -threshold and STATES[int(labels.loc[imin])] != "Bear":
+        raise RuntimeError(
+            "FIX-2: strongest -window labelled "
+            f"{STATES[int(labels.loc[imin])]}, expected Bear — state indices "
+            "are swapped; refusing to emit a signal."
+        )
 
 
 def nstep_forecast(matrix: np.ndarray, n: int) -> np.ndarray:
@@ -346,8 +410,12 @@ def analyze(
     threshold: float = DEFAULT_THRESHOLD,
     min_train: int = DEFAULT_MIN_TRAIN,
     hmm: bool = True,
+    stickiness_mode: str = "adjacent",
 ) -> dict:
     """Run the whole framework and return one structured dict.
+
+    stickiness_mode: "adjacent" (default, original) or "nonoverlap" (Markov-2
+    fix — de-inflates the persistence diagonal; matrix becomes window-ahead).
 
     See SKILL.md for the full field-by-field JSON contract.
     """
@@ -359,7 +427,8 @@ def analyze(
             f"rolling window ({window}). Got {len(close)} price rows."
         )
 
-    P = build_transition_matrix(labels)
+    verify_label_mapping(labels, close.pct_change(window), threshold)  # FIX-2
+    P = build_transition_matrix(labels, mode=stickiness_mode, window=window)
     pi = stationary_distribution(P)
 
     current_state = int(labels.iloc[-1])
@@ -378,6 +447,7 @@ def analyze(
         "params": {
             "window": window,
             "threshold": threshold,
+            "stickiness_mode": stickiness_mode,
             "min_train": min_train,
         },
         "states": STATES,
@@ -524,6 +594,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the HMM fit even if hmmlearn is available",
     )
     parser.add_argument(
+        "--stickiness",
+        choices=["adjacent", "nonoverlap"],
+        default="adjacent",
+        help="Transition-matrix counting: 'adjacent' (original) or 'nonoverlap' "
+        "(Markov-2 fix — de-inflates the persistence diagonal; matrix becomes "
+        "window-ahead). Default adjacent.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the analyze() dict as JSON to stdout and nothing else",
@@ -549,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
             threshold=args.threshold,
             min_train=args.min_train,
             hmm=not args.no_hmm,
+            stickiness_mode=args.stickiness,
         )
     except Exception as exc:  # noqa: BLE001
         if args.json:
