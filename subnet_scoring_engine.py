@@ -83,6 +83,14 @@ PB_MAX           = 0.35    # not more than 35% (broken)
 TAO_WINDOW       = 14
 TAO_THRESHOLD    = 0.07
 
+# Display-only divergence deadband. NOT a trading threshold, NOT Hermes-tunable:
+# scoring/allocation still consume the raw signal. This only governs the macro
+# ADVICE LINE — when the regime label and the signal sign disagree by more than
+# this, the line flags the divergence instead of printing the regime's canned
+# action (e.g. a Bull label with a firmly negative signal should not read
+# "Rotate actively. Buy pullbacks.").
+MACRO_SIGNAL_DIVERGENCE_EPS = 0.05
+
 # EMA slope lookback for trend direction
 EMA_SLOPE_BARS   = 14
 
@@ -1058,11 +1066,29 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
     by_id = {s.subnet_id: s for s in result.ranked_by_entry}
     filtered_by_id = {f["subnet_id"]: f for f in result.filtered_out}
 
+    # Reconcile the regime LABEL with the signal SIGN before printing advice.
+    # The label is the current trailing state; the signal is the forward
+    # bull-bear differential. When they diverge — e.g. a Bull state but a firmly
+    # negative signal (momentum rolling over) — the canned regime advice is
+    # misleading, so flag the divergence instead. Display-only: scoring and
+    # allocation consume m.signal directly regardless of what this line says.
+    macro_advice = m.strategy_mode
+    if m.regime == MacroRegime.BULL and m.signal < -MACRO_SIGNAL_DIVERGENCE_EPS:
+        macro_advice = (
+            f"🟢 BULL state but signal {m.signal:+.2f} negative — momentum "
+            f"rolling over. Be selective; favour taking profits over new entries."
+        )
+    elif m.regime == MacroRegime.BEAR and m.signal > MACRO_SIGNAL_DIVERGENCE_EPS:
+        macro_advice = (
+            f"🔴 BEAR state but signal {m.signal:+.2f} positive — possible "
+            f"stabilisation. Stay defensive until the regime confirms a turn."
+        )
+
     L = [
         "📊 TAO MONITOR — Portfolio Report",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🌐 TAO macro: {m.regime.value} (signal {m.signal:+.2f})",
-        f"   {m.strategy_mode}",
+        f"   {macro_advice}",
         "",
     ]
 
@@ -1155,6 +1181,16 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
         candidates.sort(key=lambda s: s.entry_score, reverse=True)
         if m.regime == MacroRegime.BULL:
             L.append("🟢 BUY THE PULLBACK")
+            # Concentration guard: if the shown candidates carry the 0.5 Gini
+            # placeholder (no real concentration fetched — the /status
+            # --no-concentration path), the Gini gate did NOT filter them, so a
+            # known-concentrated name can read as a clean buy. Flag it.
+            if any(abs(s.genie_score_raw - 0.5) < 1e-9 for s in candidates[:result.top_n]):
+                L.append(
+                    "  ⚠️ Concentration UNCHECKED this run (Gini n/a) — the Gini "
+                    "gate did NOT filter these. Verify on a full cron before "
+                    "buying; known-concentrated names are not excluded here."
+                )
         else:
             L.append("👀 WATCH ONLY — hold, don't add (macro not bullish)")
         shown = 0
