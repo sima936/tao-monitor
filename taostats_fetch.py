@@ -70,6 +70,7 @@ METAGRAPH_LATEST = "/api/metagraph/latest/v1"
 SUBNET_INFO = "/api/dtao/subnet/latest/v1"
 STAKE_BALANCE = "/api/dtao/stake_balance/latest/v1"
 DELEGATION = "/api/delegation/v1"   # staking/delegation events (buys & sells)
+ACCOUNT_LATEST = "/api/account/latest/v1"   # coldkey balance: free / staked / total
 
 # Default wallet — Simon's coldkey
 DEFAULT_COLDKEY = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
@@ -223,6 +224,32 @@ class TaostatsClient:
         """
         data = self.get(STAKE_BALANCE, params={"coldkey": coldkey, "limit": 100})
         return data.get("data", [])
+
+    def get_free_balance_tao(self, coldkey: str = DEFAULT_COLDKEY) -> Optional[float]:
+        """Free (unstaked / transferable) TAO for a coldkey, in TAO.
+
+        GET /api/account/latest/v1?address={coldkey} → data[0].balance_free (rao).
+        This is the wallet balance that get_wallet_stakes (stake positions only)
+        does NOT see — the TAO sitting idle after an unstake/take-profit.
+
+        Pure enrichment: returns None on ANY failure (network, schema, empty) so
+        a missing free read can never break a scoring cycle. The caller treats
+        None as "free unknown this run" and reports staked-only, as before.
+        """
+        try:
+            data = self.get(ACCOUNT_LATEST, params={"address": coldkey, "limit": 1})
+            rows = data.get("data", [])
+            if not rows:
+                logger.warning("Free-balance read: empty account response — skipping.")
+                return None
+            free_rao = rows[0].get("balance_free")
+            if free_rao is None:
+                logger.warning("Free-balance read: no balance_free field — skipping.")
+                return None
+            return float(free_rao) / 1e9
+        except Exception as e:  # noqa: BLE001 — enrichment must never be fatal
+            logger.warning(f"Free-balance read failed (non-fatal): {e}")
+            return None
 
     def get_delegation_events(
         self,
