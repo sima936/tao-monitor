@@ -984,6 +984,22 @@ def run(
         {sid: b / account_tao for sid, b in bal_by_netuid.items()}
         if (bal_by_netuid and account_tao) else None
     )
+    # Free (unstaked) TAO — cron-only enrichment, read SEPARATELY from the deploy
+    # base ON PURPOSE. account_tao above stays = STAKED so the allocator keeps
+    # sizing targets off *deployable* capital. Folding free in here would, with
+    # the deploy dial pinned at 100% (deploy_bands=((-9.99,1.00),)), make the plan
+    # recommend deploying the cash — the opposite of "park it". So free is
+    # reported (digest + dashboard payload), not auto-deployed. Soft-fail → None.
+    free_tao = None
+    account_total_tao = account_tao
+    if cost_basis and bal_by_netuid:
+        free_tao = client.get_free_balance_tao()
+        if free_tao is not None:
+            account_total_tao = (account_tao or 0.0) + free_tao
+            logger.info(
+                f"Account: staked {account_tao or 0.0:.3f}τ + free {free_tao:.3f}τ "
+                f"= total {account_total_tao:.3f}τ"
+            )
     # Size only REAL-DATA subnets: the enrichment `targets` (holdings + watchlist
     # + movers that received real history/Gini) ∪ holdings. Excludes the ~100
     # placeholder-history subnets whose health scores aren't trustworthy — those
@@ -1069,6 +1085,8 @@ def run(
     try:
         _payload = json.loads(to_json(result))
         _payload["allocation"] = plan.to_dict()
+        _payload["free_tao"] = free_tao
+        _payload["account_total_tao"] = account_total_tao
         payload_json = json.dumps(_payload)
     except Exception as e:
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
@@ -1092,6 +1110,13 @@ def run(
                                 pnl_by_netuid=pnl_by_netuid)
     if cost_basis:   # cron digest only — keep the 60s /status path lean (no alloc block)
         msg += "\n\n" + format_allocation_plan(plan, account_tao=account_tao)
+        if free_tao is not None:
+            msg += (
+                f"\n\n💰 Free/unstaked: {free_tao:.2f}τ — NOT deployed and invisible "
+                f"to the allocator. Stake into SN0/root to earn base yield and make "
+                f"it counted. Account total ≈ {account_total_tao:.1f}τ "
+                f"({account_tao or 0.0:.1f} staked + {free_tao:.1f} free)."
+            )
     print(msg)
 
     # Change detection — decide whether to send
