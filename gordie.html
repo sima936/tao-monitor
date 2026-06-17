@@ -315,8 +315,8 @@ tr:hover { background: rgba(240,185,11,0.03); }
 .alloc-label { width: 110px; font-size: 0.7rem; color: var(--text); white-space: nowrap; }
 .alloc-track { flex: 1; height: 14px; background: var(--surface2); border-radius: 3px; position: relative; overflow: hidden; }
 .alloc-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
-.alloc-target-line { position: absolute; top: 0; bottom: 0; width: 3px; background: #ff6b00; z-index: 2; box-shadow: 0 0 4px #ff6b00; }
-.alloc-target-line::before { content: '▼'; position: absolute; top: -1px; left: 50%; transform: translateX(-50%); font-size: 7px; color: #fff; line-height: 1; }
+.alloc-entry-line { position: absolute; top: 0; bottom: 0; width: 3px; background: #ff6b00; z-index: 2; box-shadow: 0 0 4px #ff6b00; }
+.alloc-entry-line::before { content: '▼'; position: absolute; top: -1px; left: 50%; transform: translateX(-50%); font-size: 7px; color: #fff; line-height: 1; }
 .alloc-pct { width: 45px; text-align: right; font-size: 0.7rem; font-weight: 500; }
 .drift-ok { color: var(--green); }
 .drift-warn { color: var(--warn); }
@@ -457,26 +457,7 @@ footer {
         <div class="card-sub" id="port-total-pnl-pct">vs cost basis</div>
       </div>
     </div>
-    <div class="section-title">Staked Positions <span class="badge" id="port-badge">loading...</span></div>
-    <table>
-      <thead>
-        <tr>
-          <th>Subnet</th>
-          <th>Staked (τ)</th>
-          <th>Cost (τ)</th>
-          <th>P&amp;L (τ)</th>
-          <th>P&amp;L %</th>
-          <th>Value (£)</th>
-          <th class="hide-mobile">Allocation</th>
-          <th class="hide-mobile">Target</th>
-          <th class="hide-mobile">Drift</th>
-        </tr>
-      </thead>
-      <tbody id="portfolio-body">
-        <tr><td colspan="9" class="loading"><span class="spinner"></span>Fetching from chain...</td></tr>
-      </tbody>
-    </table>
-    <div class="section-title" style="margin-top:1.5rem">Profit / Loss From Entry</div>
+    <div class="section-title">Profit / Loss From Entry</div>
     <div style="font-size:0.62rem;color:var(--muted);margin-bottom:0.5rem">Grey line = break-even (your cost basis). Green right = in profit since entry · red left = underwater. Scale ±60%. Right column = 24h · 7d · Markov regime, for quick advisory confirmation.</div>
     <div id="pnl-chart" style="padding:0.5rem 0"></div>
     <div class="section-title" style="margin-top:1.5rem">Allocation Chart</div>
@@ -530,7 +511,7 @@ footer {
     <div class="section-title">Top Opportunities — v4 engine <span class="badge" id="opp-badge">—</span></div>
     <div id="opp-macro"></div>
     <div style="font-size:0.7rem;color:var(--muted);margin:0.25rem 0 0.5rem">
-      Real-data subnets only (data-maturity 100), sorted by entry_score (pullback quality, macro-aware via p2). New entries are macro-gated — acted on only in Bull. Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
+      Real-data subnets only (≥60 maturity — real price history, not placeholders), sorted by entry_score (pullback quality, macro-aware via p2). New entries are macro-gated — acted on only in Bull. Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
     </div>
     <table>
       <thead>
@@ -592,17 +573,8 @@ footer {
 
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
-const HOLDINGS = {
-  0:   {name: 'Root'},
-  4:   {name: 'Targon'},
-  9:   {name: 'Iota'},
-  44:  {name: 'Score'},
-  46:  {name: 'Zipcode'},
-  55:  {name: 'NIOME'},
-  68:  {name: 'NOVA'},
-  107: {name: 'Minos'},
-  123: {name: 'MANTIS'},
-};
+// Holdings are read live from the wallet (/api/portfolio/stakes) at load time —
+// no hardcoded list (the old one still listed sold names like MANTIS/Minos/NIOME).
 
 const WATCHLIST = {
   3:'Teutonic'
@@ -616,6 +588,10 @@ const SUBNET_NAME_FALLBACK = {
 };
 
 const BLACKLIST = new Set([17, 29, 43, 53, 89, 104, 112, 115]);
+
+// Live wallet holdings (netuids), refreshed each load from /api/portfolio/stakes.
+// Used to mark held names (📌 / HOLD) across tabs — never a hardcoded list.
+let liveHoldingsSet = new Set();
 
 const FILTERS = {
   price_cap: 0.15,
@@ -790,10 +766,12 @@ function statusTag(passed, reason) {
   return `<span class="tag ${cls}">${reason}</span>`;
 }
 
-function renderHoldings(results) {
+function renderHoldings(results, holdingNetuids) {
   const tbody = document.getElementById('holdings-body');
-  const holdingNetuids = Object.keys(HOLDINGS).map(Number);
-  const rows = results.filter(r => holdingNetuids.includes(r.metrics.netuid));
+  // Driven by the live wallet read (passed in), not a hardcoded list — so sold
+  // names (e.g. MANTIS / Minos / NIOME) no longer appear as current holdings.
+  const ids = Array.isArray(holdingNetuids) ? holdingNetuids : [];
+  const rows = results.filter(r => ids.includes(r.metrics.netuid));
 
   let alertCount = 0;
   let html = '';
@@ -882,9 +860,12 @@ function renderOpportunities(score) {
     }
   }
 
-  // ── Gate: real-data only. Engine sets p9_data_maturity == 100 when enriched. ──
+  // ── Gate: real-data only. GeckoTerminal supplies ~90 daily bars → maturity ≈73;
+  //    synthetic placeholder history (≈9 bars) scores ≈10. Gate at ≥60 admits real-
+  //    history subnets and excludes placeholders. (The old `=== 100` required 150
+  //    bars — more than the data source ever provides — so it hid everything.) ──
   const ranked = score.ranked;
-  const real = ranked.filter(r => r.params && r.params.p9_data_maturity === 100);
+  const real = ranked.filter(r => r.params && r.params.p9_data_maturity >= 60);
   const hidden = ranked.length - real.length;
   real.sort((a, b) => (b.entry_score || 0) - (a.entry_score || 0)); // defensive re-sort
 
@@ -901,7 +882,7 @@ function renderOpportunities(score) {
 
   let html = '';
   real.forEach(r => {
-    const held   = (r.subnet_id in HOLDINGS) ? ' 📌' : (r.subnet_id in WATCHLIST ? ' 👁' : '');
+    const held   = liveHoldingsSet.has(r.subnet_id) ? ' 📌' : (r.subnet_id in WATCHLIST ? ' 👁' : '');
     const regime = r.markov_available ? (r.markov_regime || '—') : 'n/a';
     const regCls = regime === 'Bull' ? 'pct-positive' : regime === 'Bear' ? 'pct-negative' : 'pct-neutral';
     const d24 = (r.pct_change_24h === null || r.pct_change_24h === undefined) ? null : r.pct_change_24h * 100;
@@ -959,7 +940,7 @@ function renderAllSubnets(results) {
   sorted.forEach(r => {
     const m = r.metrics;
     const cls = r.passed ? 'pass-row' : (BLACKLIST.has(m.netuid) ? '' : '');
-    const holdTag = m.netuid in HOLDINGS ? '<span class="tag tag-hold">HOLD</span> ' : '';
+    const holdTag = liveHoldingsSet.has(m.netuid) ? '<span class="tag tag-hold">HOLD</span> ' : '';
     const watchTag = m.netuid in WATCHLIST ? '<span class="tag tag-watch">W</span> ' : '';
     html += `<tr class="${cls}">
       <td>SN${m.netuid}</td>
@@ -1075,7 +1056,8 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   document.getElementById('port-total-tao').textContent = totalTao.toFixed(2) + 'τ';
   document.getElementById('port-total-gbp').textContent = '£' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
   document.getElementById('port-count').textContent = positions.length;
-  document.getElementById('port-badge').textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
+  const portBadge = document.getElementById('port-badge');
+  if (portBadge) portBadge.textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
 
   const pnlEl = document.getElementById('port-total-pnl');
   const pnlPctEl = document.getElementById('port-total-pnl-pct');
@@ -1102,6 +1084,13 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   let html = '';
   let allocHtml = '';
   let pnlHtml = '';
+  // Allocation-chart scale: fit both current value and entry cost on one track,
+  // shared across holdings so bar lengths are directly comparable (relative τ).
+  const allocRef = Math.max(0.0001, ...positions.map(q => {
+    const qcb = cbPos[q.netuid] ?? cbPos[String(q.netuid)];
+    const qInv = (qcb && qcb.tao_invested != null) ? Number(qcb.tao_invested) : q.tao;
+    return Math.max(q.tao, qInv);
+  }));
   positions.forEach((p, i) => {
     const valGbp = p.tao * gbp;
     const actualPct = totalTao > 0 ? (p.tao / totalTao) * 100 : 0;
@@ -1129,13 +1118,18 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
       <td class="hide-mobile ${driftCls}">${drift != null ? driftStr : '—'}</td>
     </tr>`;
 
+    // Bar length = this holding's current TAO value relative to the largest, so
+    // lengths compare across holdings. Orange line = your entry/cost on the same
+    // scale: bar end past the line = up since entry, line past the bar = underwater.
+    const barPct = Math.min((p.tao / allocRef) * 100, 100);
+    const entryPct = invested != null ? Math.min((invested / allocRef) * 100, 100) : null;
     allocHtml += `<div class="alloc-bar-row">
       <div class="alloc-label">SN${p.netuid} ${p.name}</div>
       <div class="alloc-track">
-        <div class="alloc-fill" style="width:${Math.min(actualPct * 2.5, 100)}%;background:${color}"></div>
-        ${targetPct != null && targetPct > 0 ? `<div class="alloc-target-line" style="left:${Math.min(targetPct * 2.5, 100)}%"></div>` : ''}
+        <div class="alloc-fill" style="width:${barPct}%;background:${color}"></div>
+        ${entryPct != null ? `<div class="alloc-entry-line" style="left:${entryPct}%" title="entry ${invested.toFixed(2)}τ"></div>` : ''}
       </div>
-      <div class="alloc-pct">${actualPct.toFixed(1)}%</div>
+      <div class="alloc-pct">${p.tao.toFixed(2)}τ</div>
     </div>`;
 
     // P&L-from-entry bar: break-even at centre, green right = profit, red left = loss.
@@ -1186,7 +1180,7 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
     <td class="hide-mobile">100%</td><td class="hide-mobile"></td><td class="hide-mobile"></td>
   </tr>`;
 
-  tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center">No positions found</td></tr>';
+  if (tbody) tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center">No positions found</td></tr>';
   document.getElementById('alloc-chart').innerHTML = allocHtml;
   document.getElementById('pnl-chart').innerHTML = pnlHtml;
 }
@@ -1199,7 +1193,11 @@ async function loadData() {
   statusText.textContent = 'Scanning...';
 
   try {
-    const [poolData, priceData] = await Promise.all([fetchPools(), fetchPrice().catch(() => null)]);
+    const [poolData, priceData, stakeData] = await Promise.all([
+      fetchPools(),
+      fetchPrice().catch(() => null),
+      fetchPortfolioStakes().catch(() => null),
+    ]);
 
     // netuid -> subnet name from the live pools feed (authoritative)
     const nameByNetuid = {};
@@ -1208,15 +1206,18 @@ async function loadData() {
       if (!isNaN(n) && p.name) nameByNetuid[n] = p.name;
     });
 
-    // Portfolio — fetch in parallel, don't block scanner if it fails.
-    // fetchScore() supplies the allocation block (derived targets/drift); it's
-    // optional, so a missing/old score just renders targets as '—'.
-    Promise.all([fetchPortfolioStakes(), fetchCostBasis(), fetchScore().catch(() => null)]).then(([stakeData, costBasis, score]) => {
-      renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score);
+    // Real holdings from the live wallet read (same feed the Portfolio uses) —
+    // replaces the old hardcoded HOLDINGS list that still showed sold names.
+    const liveHoldingNetuids = ((stakeData && stakeData.data) || [])
+      .filter(s => (parseInt(s.balance_as_tao || '0') / 1e9) > 0.001)
+      .map(s => parseInt(s.netuid));
+    liveHoldingsSet = new Set(liveHoldingNetuids);
+
+    // Portfolio — reuse the stakeData fetched above; cost-basis + score are optional.
+    Promise.all([fetchCostBasis(), fetchScore().catch(() => null)]).then(([costBasis, score]) => {
+      if (stakeData) renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score);
     }).catch(err => {
-      console.warn('Portfolio fetch failed:', err);
-      document.getElementById('portfolio-body').innerHTML =
-        '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:1rem">Portfolio data unavailable</td></tr>';
+      console.warn('Portfolio render failed:', err);
     });
 
     // Price
@@ -1264,7 +1265,7 @@ async function loadData() {
 
     // Render all views
     allSubnets = results;
-    renderHoldings(results);
+    renderHoldings(results, liveHoldingNetuids);
     renderWatchlist(results);
     renderAllSubnets(results);
     renderFilterBreakdown(results);
