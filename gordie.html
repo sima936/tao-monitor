@@ -545,7 +545,7 @@ footer {
           <th data-sort="pct_day">24H%</th>
           <th data-sort="pct_week">7D%</th>
           <th data-sort="pct_month">30D%</th>
-          <th>Trend 30d</th>
+          <th>Trend 7d</th>
           <th data-sort="pool_depth">Pool (τ)</th>
           <th>Status</th>
           <th data-sort="reason">Reason</th>
@@ -904,25 +904,25 @@ function renderOpportunities(score) {
   tbody.innerHTML = html;
 }
 
-// Coarse trend sparkline from the change figures already on the row: 4 real
-// anchor points (30d / 7d / 1d / now), time-spaced. NOT a daily series — a true
-// smooth sparkline needs the cron to emit the daily price window.
+// Coarse 7-day trend sparkline from the change figures already on the row:
+// 3 real anchor points (7d / 1d / now), time-spaced. NOT a daily series — a true
+// smooth daily sparkline needs the cron to emit the daily price window.
 function trendSpark(m) {
   const now = m.price;
   if (now == null || !isFinite(now)) return '<span class="pct-neutral" style="font-size:0.6rem">—</span>';
   const back = p => (p == null || !isFinite(p)) ? null : now / (1 + p / 100);
-  const anchors = [[30, back(m.pct_month)], [7, back(m.pct_week)], [1, back(m.pct_day)], [0, now]]
+  const anchors = [[7, back(m.pct_week)], [1, back(m.pct_day)], [0, now]]
     .filter(a => a[1] != null && isFinite(a[1]) && a[1] > 0);
   if (anchors.length < 2) return '<span class="pct-neutral" style="font-size:0.6rem">—</span>';
   const W = 64, H = 16, pad = 2;
   const ys = anchors.map(a => a[1]);
   const min = Math.min(...ys), max = Math.max(...ys), span = (max - min) || 1;
-  const X = d => pad + (30 - d) / 30 * (W - 2 * pad);
+  const X = d => pad + (7 - d) / 7 * (W - 2 * pad);
   const Y = v => H - pad - (v - min) / span * (H - 2 * pad);
   const path = anchors.map((a, i) => `${i ? 'L' : 'M'}${X(a[0]).toFixed(1)},${Y(a[1]).toFixed(1)}`).join(' ');
   const up = anchors[anchors.length - 1][1] >= anchors[0][1];
   const col = up ? 'var(--green)' : 'var(--red)';
-  return `<svg width="${W}" height="${H}" style="vertical-align:middle" aria-label="30d trend"><path d="${path}" fill="none" stroke="${col}" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
+  return `<svg width="${W}" height="${H}" style="vertical-align:middle" aria-label="7d trend"><path d="${path}" fill="none" stroke="${col}" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
 }
 
 function renderAllSubnets(results) {
