@@ -145,6 +145,8 @@ class TargetPosition:
     pending_exit:   bool = False           # cut-worthy but inside the confirm window:
                                            # held at a toehold, not yet zeroed (OPEN #6)
     reason:         str = ""
+    genie_score:    Optional[float] = None # real concentration if fetched; 0.5
+                                           # placeholder / None = NOT fetched this run
 
 
 @dataclass
@@ -408,6 +410,7 @@ def compute_target_allocation(
                 capped_by=capped_flags.get(sid),
                 pending_exit=is_pending,
                 reason=reason,
+                genie_score=getattr(s, "genie_score_raw", None),
             ))
 
     positions.sort(key=lambda p: p.target_weight, reverse=True)
@@ -492,14 +495,32 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
     ]
     if plan.positions:
         lines.append("🟢 TARGET BOOK (green, conviction-sized):")
+        unchecked_entries = []
         for p in plan.positions:
             d = "" if p.drift is None else f" · drift {p.drift:+.0%}"
             act = "" if p.action in ("hold", "target") else f" → {p.action.upper()}"
             cap = f" [{p.capped_by} cap]" if p.capped_by else ""
             pend = f" ⏳{p.reason}" if p.pending_exit else ""
+            # Concentration guard on NEW exposure only: an enter/add on a name
+            # whose real Gini wasn't fetched (0.5 placeholder / None) has NOT
+            # cleared the concentration gate on its true value, so a concentrated
+            # name can read as a clean ENTER. Holds/trims don't add exposure → no flag.
+            conc = ""
+            if p.action in ("enter", "add") and (
+                p.genie_score is None or abs(p.genie_score - 0.5) < 1e-9
+            ):
+                conc = " ⚠️Gini unchecked"
+                unchecked_entries.append(p.subnet_id)
             lines.append(
                 f"  {p.tier:>2} SN{p.subnet_id} {p.name} — {p.target_weight:.0%}{tao(p.target_weight)}"
-                f" (h{p.health_score:.0f}/{p.markov_regime}){cap}{d}{act}{pend}"
+                f" (h{p.health_score:.0f}/{p.markov_regime}){cap}{d}{act}{pend}{conc}"
+            )
+        if unchecked_entries:
+            names = ", ".join(f"SN{s}" for s in unchecked_entries)
+            lines.append(
+                f"  ⚠️ ENTER/ADD on concentration-UNCHECKED names ({names}): real "
+                "Gini not fetched this run — verify before deploying; the gate "
+                "hasn't seen their true concentration."
             )
         lines.append("")
     exits = [c for c in plan.cut if c.get("action") == "EXIT"]
