@@ -1145,7 +1145,11 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
     const color = colors[i % colors.length];
 
     const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
-    const invested = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
+    let invested = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
+    // Root/SN0 is cash (1:1 TAO) — no P&L. Guards against a phantom P&L when a
+    // stake-in isn't yet booked in cost basis (Taostats indexing lag) and keeps
+    // root out of the total-P&L aggregate below.
+    if (p.netuid === 0) invested = null;
     const pnl = invested != null ? (p.tao - invested) : null;
     const pnlPct = (invested != null && invested > 0) ? (pnl / invested) * 100 : null;
 
