@@ -1258,6 +1258,10 @@ async function loadData() {
     // Portfolio — reuse the stakeData fetched above; cost-basis + score are optional.
     Promise.all([fetchCostBasis(), fetchScore().catch(() => null)]).then(([costBasis, score]) => {
       if (stakeData) renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score);
+      // Re-render Opportunities now that liveHoldingsSet is populated — loadScore()
+      // may have rendered it earlier against an empty set (race), leaking held names
+      // (e.g. iota) into "picks". This pass excludes holdings correctly.
+      if (score) renderOpportunities(score);
     }).catch(err => {
       console.warn('Portfolio render failed:', err);
     });
