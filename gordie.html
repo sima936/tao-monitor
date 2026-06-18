@@ -513,7 +513,7 @@ footer {
     <div class="section-title">Top Opportunities — v4 engine <span class="badge" id="opp-badge">—</span></div>
     <div id="opp-macro"></div>
     <div style="font-size:0.7rem;color:var(--muted);margin:0.25rem 0 0.5rem">
-      Real-data subnets only (≥60 maturity — real price history, not placeholders), sorted by entry_score (pullback quality, macro-aware via p2). New entries are macro-gated — acted on only in Bull. Low-maturity / placeholder subnets are hidden. Source: <code>/api/score</code> (cron, not browser).
+      Your <strong>picks</strong> first — un-held pullback entries, ranked by entry_score (holdings excluded; they're on the Portfolio tab). Names at their highs (chasing / take-profit) are demoted as <em>"not an entry."</em> Light-data picks are surfaced too but flagged <em>"verify Gini"</em> — real concentration not yet fetched. Source: <code>/api/score</code> (cron, not browser).
     </div>
     <table>
       <thead>
@@ -862,37 +862,54 @@ function renderOpportunities(score) {
     }
   }
 
-  // ── Gate: real-data only. GeckoTerminal supplies ~90 daily bars → maturity ≈73;
-  //    synthetic placeholder history (≈9 bars) scores ≈10. Gate at ≥60 admits real-
-  //    history subnets and excludes placeholders. (The old `=== 100` required 150
-  //    bars — more than the data source ever provides — so it hid everything.) ──
+  // ── Group for the operator's actual decision:
+  //    PICKS   = un-held, non-chaser entries (genuine pullbacks) — what to consider.
+  //              Surfaced even if light-data (maturity < 60) so real pullbacks aren't
+  //              hidden; those rows are flagged "verify Gini".
+  //    AT-HIGH = un-held names the engine flags chasing / at-recent-high / take-profit
+  //              — kept VISIBLE but demoted and clearly marked "not an entry".
+  //    Held names are excluded entirely (they live on the Portfolio tab).
   const ranked = score.ranked;
-  const real = ranked.filter(r => r.params && r.params.p9_data_maturity >= 60);
-  const hidden = ranked.length - real.length;
-  real.sort((a, b) => (b.entry_score || 0) - (a.entry_score || 0)); // defensive re-sort
+  const isChaser = r =>
+    (r.take_profit_flags && r.take_profit_flags.length > 0) ||
+    (r.entry_flags || []).some(f => String(f).toUpperCase().includes('CHASING'));
+  const isDeprecated = r => String(r.name || '').toLowerCase().includes('deprecat');
+  const mature = r => !!(r.params && r.params.p9_data_maturity >= 60);
 
-  if (badge) badge.textContent =
-    real.length + ' real-data' + (hidden > 0 ? ' · ' + hidden + ' hidden' : '');
+  const candidates = ranked.filter(r =>
+    r.subnet_id !== 0 && !liveHoldingsSet.has(r.subnet_id) && !isDeprecated(r));
+  const byScore = (a, b) => (b.entry_score || 0) - (a.entry_score || 0);
 
-  if (real.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No subnets at full data-maturity this cycle.</td></tr>';
+  const picks   = candidates.filter(r => !isChaser(r)).sort(byScore).slice(0, 12);
+  const chasers = candidates.filter(r => isChaser(r) && mature(r)).sort(byScore).slice(0, 8);
+
+  if (badge) badge.textContent = picks.length + ' picks · ' + chasers.length + ' at-high';
+
+  if (picks.length === 0 && chasers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);text-align:center;padding:2rem">No candidates this cycle (holdings are on the Portfolio tab).</td></tr>';
     return;
   }
 
   const giniStr = g => (g === null || g === undefined) ? 'n/a'
                      : (Math.abs(g - 0.5) < 1e-9 ? 'n/a' : g.toFixed(2)); // 0.5 = placeholder sentinel
 
-  let html = '';
-  real.forEach(r => {
-    const held   = liveHoldingsSet.has(r.subnet_id) ? ' 📌' : (r.subnet_id in WATCHLIST ? ' 👁' : '');
+  const rowFor = (r, kind) => {
     const regime = r.markov_available ? (r.markov_regime || '—') : 'n/a';
     const regCls = regime === 'Bull' ? 'pct-positive' : regime === 'Bear' ? 'pct-negative' : 'pct-neutral';
     const d24 = (r.pct_change_24h === null || r.pct_change_24h === undefined) ? null : r.pct_change_24h * 100;
     const d7  = (r.pct_change_7d  === null || r.pct_change_7d  === undefined) ? null : r.pct_change_7d  * 100;
-    const flags = [].concat(r.entry_flags || [], r.take_profit_flags || [], r.alert_flags || [])
-      .map(f => `<span class="tag tag-fail" style="font-size:0.55rem">${String(f).toLowerCase()}</span>`).join(' ');
-    html += `<tr class="pass-row">
-      <td>SN${r.subnet_id}${held}</td>
+    let tag, rowAttr;
+    if (kind === 'pick') {
+      tag = mature(r)
+        ? '<span class="tag tag-pass" style="font-size:0.55rem">pick · real data</span>'
+        : '<span class="tag tag-watch" style="font-size:0.55rem">pick · light data — verify Gini</span>';
+      rowAttr = ' class="pass-row"';
+    } else {
+      tag = '<span class="tag tag-fail" style="font-size:0.55rem">at high — not an entry</span>';
+      rowAttr = ' class="pass-row" style="opacity:0.5"';
+    }
+    return `<tr${rowAttr}>
+      <td>SN${r.subnet_id}</td>
       <td><strong>${r.name}</strong></td>
       <td>${scoreCell(Math.round(r.entry_score))}</td>
       <td>${scoreCell(Math.round(r.health_score))}</td>
@@ -900,9 +917,16 @@ function renderOpportunities(score) {
       <td>${pctCell(d24)}</td>
       <td>${pctCell(d7)}</td>
       <td>${giniStr(r.genie_score_raw)}</td>
-      <td class="hide-mobile">${flags || '—'}</td>
+      <td class="hide-mobile">${tag}</td>
     </tr>`;
-  });
+  };
+
+  let html = '';
+  picks.forEach(r => { html += rowFor(r, 'pick'); });
+  if (chasers.length) {
+    html += '<tr><td colspan="9" style="color:var(--muted);font-size:0.6rem;padding:0.6rem 0 0.2rem;border:none">— at recent high / chasing · visible but NOT entries —</td></tr>';
+    chasers.forEach(r => { html += rowFor(r, 'chaser'); });
+  }
   tbody.innerHTML = html;
 }
 
