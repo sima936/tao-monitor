@@ -666,6 +666,56 @@ def select_candidates(all_metrics, holdings, watchlist, budget: int) -> list[int
 # TAO macro regime (from tao_price_history.json written by a separate fetcher)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fetch_tao_close(years: int = 1):
+    """Daily TAO close as a pandas Series. Railway-reachable source first.
+
+    CoinGecko (plain REST, no key, Railway reaches it) is primary. yfinance
+    (Yahoo — blocked from Railway cloud IPs, works locally) is a secondary so
+    a dev box still runs. No file, no second machine — this is the whole point.
+    """
+    import pandas as pd
+
+    # 1) CoinGecko market_chart, TAO/USD daily. days>90 auto-returns daily
+    #    granularity — do NOT pass interval=daily (401s on the free tier).
+    try:
+        days = max(int(years * 365), 90)
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/coins/bittensor/market_chart",
+            params={"vs_currency": "usd", "days": days},
+            headers={"accept": "application/json"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        prices = resp.json().get("prices", [])
+        if len(prices) > 30:
+            idx = pd.to_datetime([p[0] for p in prices], unit="ms").normalize()
+            close = pd.Series(
+                [float(p[1]) for p in prices], index=idx, name="TAO-USD"
+            )
+            close = close[~close.index.duplicated(keep="last")].sort_index()
+            logger.info(f"Inline macro: {len(close)} TAO closes via CoinGecko")
+            return close
+        logger.warning("Inline macro: CoinGecko returned too few rows")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Inline macro CoinGecko fetch failed: {e}")
+
+    # 2) yfinance secondary — fine off-Railway, harmless if Yahoo blocks it.
+    try:
+        from markov_regime import fetch_ticker
+        for ticker in ("TAO22974-USD", "TAO-USD"):
+            try:
+                c = fetch_ticker(ticker, years=years)
+                if c is not None and len(c) > 30:
+                    logger.info(f"Inline macro: TAO closes via yfinance {ticker}")
+                    return c
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Inline macro yfinance {ticker} failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Inline macro yfinance import failed: {e}")
+
+    return None
+
+
 def compute_tao_macro_inline(years: int = 1) -> dict | None:
     """Compute the TAO macro regime in-process — no external file dependency.
 
@@ -676,23 +726,15 @@ def compute_tao_macro_inline(years: int = 1) -> dict | None:
     back to the file, then to Unknown — never worse than current behaviour.
     """
     try:
-        from markov_regime import analyze, fetch_ticker  # lazy
+        from markov_regime import analyze  # lazy
         from subnet_scoring_engine import TAO_WINDOW, TAO_THRESHOLD
     except Exception as e:
         logger.warning(f"Inline macro import failed: {e}")
         return None
 
-    close = None
-    for ticker in ("TAO22974-USD", "TAO-USD"):
-        try:
-            c = fetch_ticker(ticker, years=years)
-            if c is not None and len(c) > 30:
-                close = c
-                break
-        except Exception as e:
-            logger.warning(f"Inline macro fetch {ticker} failed: {e}")
+    close = _fetch_tao_close(years=years)
     if close is None or len(close) < 30:
-        logger.warning("Inline macro: no TAO price data — falling back")
+        logger.warning("Inline macro: no TAO price data from any source")
         return None
 
     try:
@@ -842,7 +884,9 @@ def run(
     gini_cache = load_gini_cache()
 
     # Load TAO macro signal — inline compute first, file fallback, then Unknown
-    macro = compute_tao_macro_inline() or load_tao_macro_signal()
+    # Macro is computed in-process on Railway every cron (CoinGecko → Markov).
+    # No tao_macro.json, no Infinity8 cron — one machine, live every run.
+    macro = compute_tao_macro_inline()
 
     # Fetch subnet data
     client = TaostatsClient(api_key=api_key)
