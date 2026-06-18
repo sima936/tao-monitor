@@ -851,7 +851,7 @@ function renderOpportunities(score) {
                  : reg === 'Sideways' ? 'no new entries — hold conviction (rank only)'
                  : reg === 'Bull'     ? 'entries live — rotate actively'
                  : '';
-      const sig = (m.signal === null || m.signal === undefined) ? '—' : m.signal.toFixed(2);
+      const sig = (m.signal === null || m.signal === undefined) ? '—' : m.signal.toFixed(3);
       banner.innerHTML =
         `<div style="border-left:3px solid ${col};padding:0.4rem 0.6rem;background:rgba(255,255,255,0.02);border-radius:4px">
            <strong style="color:${col}">TAO macro: ${reg}</strong>
