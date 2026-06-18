@@ -317,7 +317,9 @@ tr:hover { background: rgba(240,185,11,0.03); }
 .alloc-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
 .alloc-entry-line { position: absolute; top: 0; bottom: 0; width: 3px; background: #ff6b00; z-index: 2; box-shadow: 0 0 4px #ff6b00; }
 .alloc-entry-line::before { content: '▼'; position: absolute; top: -1px; left: 50%; transform: translateX(-50%); font-size: 7px; color: #fff; line-height: 1; }
-.alloc-pct { width: 45px; text-align: right; font-size: 0.7rem; font-weight: 500; }
+.alloc-gain { position: absolute; top: 0; bottom: 0; background: rgba(16,185,129,0.60); z-index: 1; }
+.alloc-loss { position: absolute; top: 0; bottom: 0; background: rgba(239,68,68,0.40); border: 1px dashed rgba(239,68,68,0.95); box-sizing: border-box; z-index: 1; }
+.alloc-pct { width: 58px; text-align: right; font-size: 0.7rem; font-weight: 500; line-height: 1.15; }
 .drift-ok { color: var(--green); }
 .drift-warn { color: var(--warn); }
 .drift-danger { color: var(--red); }
@@ -462,7 +464,7 @@ footer {
         <div class="card-sub" id="port-free-sub">stake SN0 to deploy + earn yield</div>
       </div>
     </div>
-    <div class="section-title">Allocation Chart <span style="font-size:0.62rem;color:var(--muted);font-weight:400">— bar = TAO held · orange line = your entry/cost</span></div>
+    <div class="section-title">Allocation Chart <span style="font-size:0.62rem;color:var(--muted);font-weight:400">— bar = TAO held · orange line = entry/cost · green = in profit · red = underwater</span></div>
     <div id="alloc-chart" style="padding:0.5rem 0"></div>
   </div>
 
@@ -1159,18 +1161,32 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
       <td class="hide-mobile ${driftCls}">${drift != null ? driftStr : '—'}</td>
     </tr>`;
 
-    // Bar length = this holding's current TAO value relative to the largest, so
-    // lengths compare across holdings. Orange line = your entry/cost on the same
-    // scale: bar end past the line = up since entry, line past the bar = underwater.
+    // Bar = current TAO value vs the largest holding (size comparison).
+    // Orange line = entry/cost on the same scale. The zone between bar-end and
+    // line is colour-coded — green = bar past cost (profit), red = bar short of
+    // cost (underwater) — and the exact P&L% sits on the row so it reads at a
+    // glance even when the book is near break-even.
     const barPct = Math.min((p.tao / allocRef) * 100, 100);
     const entryPct = invested != null ? Math.min((invested / allocRef) * 100, 100) : null;
+    let pnlZone = '';
+    if (entryPct != null) {
+      if (barPct >= entryPct) {
+        pnlZone = `<div class="alloc-gain" style="left:${entryPct}%;width:${(barPct - entryPct).toFixed(2)}%"></div>`;
+      } else {
+        pnlZone = `<div class="alloc-loss" style="left:${barPct}%;width:${(entryPct - barPct).toFixed(2)}%"></div>`;
+      }
+    }
+    const pnlLbl = (pnlPct != null)
+      ? `<br><span style="color:${pnlPct >= 0 ? 'var(--green)' : 'var(--red)'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span>`
+      : '';
     allocHtml += `<div class="alloc-bar-row">
       <div class="alloc-label">SN${p.netuid} ${p.name}</div>
       <div class="alloc-track">
         <div class="alloc-fill" style="width:${barPct}%;background:${color}"></div>
+        ${pnlZone}
         ${entryPct != null ? `<div class="alloc-entry-line" style="left:${entryPct}%" title="entry ${invested.toFixed(2)}τ"></div>` : ''}
       </div>
-      <div class="alloc-pct">${p.tao.toFixed(2)}τ</div>
+      <div class="alloc-pct">${p.tao.toFixed(2)}τ${pnlLbl}</div>
     </div>`;
 
     // P&L-from-entry bar: break-even at centre, green right = profit, red left = loss.
