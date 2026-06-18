@@ -1154,12 +1154,26 @@ def run(
                                 pnl_by_netuid=pnl_by_netuid)
     if cost_basis:   # cron digest only — keep the 60s /status path lean (no alloc block)
         msg += "\n\n" + format_allocation_plan(plan, account_tao=account_tao)
-        if free_tao is not None:
+        if free_tao is not None and free_tao > 0.005:
+            f_dial = getattr(plan, "deployed_fraction", 1.0)
+            # Free cash follows the dial. A sub-ceiling (soft) signal is the
+            # system's "avoid entries" stance, so idle cash parks in SN0 for base
+            # yield + dry powder; only a full risk-on dial rotates it into the
+            # green book. Advisory — you stake manually (read-only stack, no keys).
+            if f_dial >= 0.999:
+                free_action = (
+                    f"🟢 Dial full risk-on — rotate free {free_tao:.2f}τ into the "
+                    f"green book per the targets above."
+                )
+            else:
+                free_action = (
+                    f"🅿️ Dial {f_dial:.0%} (soft) — stake free {free_tao:.2f}τ → SN0 "
+                    f"for base yield + dry powder. Rotate into greens on Bull."
+                )
             msg += (
-                f"\n\n💰 Free/unstaked: {free_tao:.2f}τ — NOT deployed and invisible "
-                f"to the allocator. Stake into SN0/root to earn base yield and make "
-                f"it counted. Account total ≈ {account_total_tao:.1f}τ "
-                f"({account_tao or 0.0:.1f} staked + {free_tao:.1f} free)."
+                f"\n\n💰 Free/unstaked: {free_tao:.2f}τ · account total ≈ "
+                f"{account_total_tao:.1f}τ ({account_tao or 0.0:.1f} staked + "
+                f"{free_tao:.1f} free).\n{free_action}"
             )
     print(msg)
 
