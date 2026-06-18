@@ -51,7 +51,7 @@ from datetime import datetime, timezone
 import requests
 
 from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis
-from tp_cl_stops import evaluate_stops, append_outcome_log, format_stop_alert, TRAIL_PCT, STOP_PCT
+from tp_cl_stops import evaluate_stops, append_outcome_log, append_dial_log, format_stop_alert, TRAIL_PCT, STOP_PCT
 from subnet_scoring_engine import (
     run_scoring_cycle,
     format_telegram_alert,
@@ -1156,6 +1156,18 @@ def run(
                                 pnl_by_netuid=pnl_by_netuid)
     if cost_basis:   # cron digest only — keep the 60s /status path lean (no alloc block)
         msg += "\n\n" + format_allocation_plan(plan, account_tao=account_tao)
+        # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
+        # fwd_return_* backfilled later — no lookahead. Non-fatal.
+        from datetime import datetime, timezone
+        append_dial_log({
+            "dial_ts": datetime.now(timezone.utc).isoformat(),
+            "regime": plan.macro_regime,
+            "signal": round(plan.macro_signal, 6) if plan.macro_signal is not None else "",
+            "deployed_fraction": round(plan.deployed_fraction, 6),
+            "sn0_target_weight": round(plan.sn0_target_weight, 6),
+            "account_tao_staked": round(account_tao, 6) if account_tao else "",
+            "free_tao": round(free_tao, 6) if free_tao is not None else "",
+        })
         if free_tao is not None and free_tao > 0.005:
             f_dial = getattr(plan, "deployed_fraction", 1.0)
             # Free cash follows the dial. A sub-ceiling (soft) signal is the
