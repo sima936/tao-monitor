@@ -67,15 +67,21 @@ TIER_WEIGHT = {Tier.APLUS: 4.0, Tier.A: 2.0, Tier.B: 1.0, Tier.CONVICTION: 0.5, 
 
 @dataclass
 class AllocationPolicy:
-    # ── Axis 1: the dial. (signal_floor, deployed_fraction), highest floor first.
-    #    deployed_fraction is the % of the WHOLE account that is live (rest → SN0).
-    #    No macro cash dial: SN0 is the residual parking spot for cuts with
-    #    nowhere to rotate, not a fixed target. Always fully deployed; the
-    #    cross-section (cut reds, no new entries off-Bull) decides how much
-    #    actually lands in green — the rest falls to SN0 on its own.
-    deploy_bands: tuple = (
-        (-9.99, 1.00),   # always fully deployed; SN0 = residual only
-    )
+    # ── Axis 1: the dial. A clamped LINEAR RAMP maps the macro Markov signal to
+    #    the fraction of the WHOLE (staked) account deployed; the rest parks SN0:
+    #        signal >= deploy_signal_hi → deploy_ceiling   (full risk-on)
+    #        signal <= deploy_signal_lo → deploy_floor     (de-risked, NOT flat)
+    #        in between                 → linear interpolation
+    #    Hybrid by design: smooth in the middle (no band-edge whipsaw), hard
+    #    floor + ceiling at the extremes. Floor > 0 — a soft/negative signal
+    #    parks cash in SN0 but never force-flattens the book; hard exits are the
+    #    stops'/Bear-regime's job, not the dial's.
+    #    PLACEHOLDER numbers — Simon's risk call, Hermes-calibratable later
+    #    (narrow surface: four scalars). Worked example: signal -0.18 → ~73%.
+    deploy_signal_hi:  float = 0.00    # at/above this signal → full deploy
+    deploy_signal_lo:  float = -0.40   # at/below this signal → floor
+    deploy_ceiling:    float = 1.00    # max fraction deployed
+    deploy_floor:      float = 0.40    # min fraction deployed (rest → SN0)
     unknown_macro_fraction: float = 1.00   # macro unavailable → still fully deployed
 
     # ── Axis 2: tiering off health_score.
@@ -183,13 +189,27 @@ class AllocationPlan:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def deployed_fraction(signal: float, policy: AllocationPolicy) -> float:
-    """Map the continuous macro Markov signal (−1..+1) to the fraction of the
-    account that is deployed (vs parked in SN0). Stepped for legibility + to
-    avoid whipsaw at band edges; refine to a smooth curve later if desired."""
-    for floor, frac in policy.deploy_bands:
-        if signal >= floor:
-            return frac
-    return policy.deploy_bands[-1][1]
+    """Map the macro Markov signal (−1..+1) to the fraction of the account
+    deployed (vs parked in SN0) via a clamped linear ramp:
+
+        signal >= deploy_signal_hi → deploy_ceiling
+        signal <= deploy_signal_lo → deploy_floor
+        between                    → linear interpolation
+
+    Hybrid: smooth in the middle (no band-edge whipsaw), hard floor + ceiling
+    at the extremes. Floor > 0 so a soft/negative signal parks cash without
+    flattening the book — hard exits are the stops'/Bear-regime's job.
+    """
+    hi, lo = policy.deploy_signal_hi, policy.deploy_signal_lo
+    ceil, floor = policy.deploy_ceiling, policy.deploy_floor
+    if hi <= lo:                       # misconfigured ramp → fail safe to floor
+        return floor
+    if signal >= hi:
+        return ceil
+    if signal <= lo:
+        return floor
+    t = (signal - lo) / (hi - lo)      # 0..1
+    return floor + t * (ceil - floor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +267,11 @@ def compute_target_allocation(
     # ── Axis 1 ────────────────────────────────────────────────────────────────
     if macro_available:
         f = deployed_fraction(signal, policy)
+        notes.append(
+            f"Dial: signal {signal:+.3f} → {f:.0%} deployed, {1.0 - f:.0%} parked SN0 "
+            f"(ramp {policy.deploy_floor:.0%}@{policy.deploy_signal_lo:+.2f} → "
+            f"{policy.deploy_ceiling:.0%}@{policy.deploy_signal_hi:+.2f})."
+        )
     else:
         f = policy.unknown_macro_fraction
         notes.append("Macro unavailable — deployed fraction set conservatively; treat new entries as deferred.")
