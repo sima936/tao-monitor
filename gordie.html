@@ -457,10 +457,7 @@ footer {
         <div class="card-sub" id="port-total-pnl-pct">vs cost basis</div>
       </div>
     </div>
-    <div class="section-title">Profit / Loss From Entry</div>
-    <div style="font-size:0.62rem;color:var(--muted);margin-bottom:0.5rem">Grey line = break-even (your cost basis). Green right = in profit since entry · red left = underwater. Scale ±60%. Right column = 24h · 7d · Markov regime, for quick advisory confirmation.</div>
-    <div id="pnl-chart" style="padding:0.5rem 0"></div>
-    <div class="section-title" style="margin-top:1.5rem">Allocation Chart</div>
+    <div class="section-title">Allocation Chart <span style="font-size:0.62rem;color:var(--muted);font-weight:400">— bar = TAO held · orange line = your entry/cost</span></div>
     <div id="alloc-chart" style="padding:0.5rem 0"></div>
   </div>
 
@@ -1182,7 +1179,8 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
 
   if (tbody) tbody.innerHTML = html || '<tr><td colspan="9" style="color:var(--muted);text-align:center">No positions found</td></tr>';
   document.getElementById('alloc-chart').innerHTML = allocHtml;
-  document.getElementById('pnl-chart').innerHTML = pnlHtml;
+  const pnlChartEl = document.getElementById('pnl-chart');
+  if (pnlChartEl) pnlChartEl.innerHTML = pnlHtml;
 }
 
 // ── Main Load ───────────────────────────────────────────────────────────────
