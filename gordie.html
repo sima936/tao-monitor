@@ -456,6 +456,11 @@ footer {
         <div class="card-value" id="port-total-pnl">—</div>
         <div class="card-sub" id="port-total-pnl-pct">vs cost basis</div>
       </div>
+      <div class="card">
+        <div class="card-label">Free / Unstaked</div>
+        <div class="card-value" id="port-free-tao">—</div>
+        <div class="card-sub" id="port-free-sub">stake SN0 to deploy + earn yield</div>
+      </div>
     </div>
     <div class="section-title">Allocation Chart <span style="font-size:0.62rem;color:var(--muted);font-weight:400">— bar = TAO held · orange line = your entry/cost</span></div>
     <div id="alloc-chart" style="padding:0.5rem 0"></div>
@@ -1053,6 +1058,21 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   document.getElementById('port-total-tao').textContent = totalTao.toFixed(2) + 'τ';
   document.getElementById('port-total-gbp').textContent = '£' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
   document.getElementById('port-count').textContent = positions.length;
+  // Free/unstaked TAO comes from the cron's live wallet read, carried on /api/score.
+  const freeEl = document.getElementById('port-free-tao');
+  const freeSubEl = document.getElementById('port-free-sub');
+  if (freeEl) {
+    const freeTao = (score && score.free_tao != null) ? Number(score.free_tao) : null;
+    if (freeTao != null && isFinite(freeTao)) {
+      freeEl.className = 'card-value' + (freeTao > 0.01 ? ' gold' : '');
+      freeEl.textContent = freeTao.toFixed(2) + 'τ';
+      if (freeSubEl) freeSubEl.textContent =
+        'account ≈ ' + (totalTao + freeTao).toFixed(1) + 'τ · stake SN0 to deploy';
+    } else {
+      freeEl.textContent = '—';
+      if (freeSubEl) freeSubEl.textContent = 'free balance unavailable this run';
+    }
+  }
   const portBadge = document.getElementById('port-badge');
   if (portBadge) portBadge.textContent = positions.length + ' positions · £' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
 
