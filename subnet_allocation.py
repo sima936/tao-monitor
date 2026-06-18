@@ -107,6 +107,10 @@ class AllocationPolicy:
     max_positions:    int   = 10           # ≤10 green names at once
     pool_fraction_cap: float = 0.01        # position ≤ 1% of pool depth (needs account_tao;
                                            # inert at current size — bites only as you scale)
+    per_name_full_deploy: float = 0.25     # breadth ceiling: each surviving name backs ≤25% of
+                                           # account, so a thin book (few survivors) deploys less
+                                           # and parks the rest in SN0 instead of over-concentrating.
+                                           # Inert once survivors × this ≥ 1.0.
 
     # ── Anti-churn. Drift below this (fraction of account) → HOLD, don't fiddle.
     drift_deadband: float = 0.03           # 3% of account
@@ -257,6 +261,8 @@ def compute_target_allocation(
     allow_new_entries = (regime == "Bull") or (not policy.new_entries_only_in_bull)
     suppressed_new = 0
     conviction_floored = 0
+    flagged_not_entered: list = []   # un-held names the engine reads as chasers/exit-zones:
+                                     # kept VISIBLE in a note, NOT sized into an ENTER.
 
     # Time-confirmation state (OPEN #6). Inert when now_ts is absent (e.g. the
     # holdings-less /status path) → exits act immediately, exactly as before.
@@ -289,6 +295,21 @@ def compute_target_allocation(
         if held_ids_known and not allow_new_entries and sid0 not in held_set:
             suppressed_new += 1
             continue  # non-Bull macro → no new exposure; leave discovery to Opportunities
+        # ── A NEW (un-held) name the engine flags as a chaser / exit-zone is NOT an
+        #    entry: it's at/near its high (take_profit_flags: AT_RECENT_HIGH /
+        #    TAKE_PROFIT*) or explicitly CHASING. The scoring engine already drops
+        #    these from its buy list; the allocator must too, or it sizes an ENTER
+        #    into a name it simultaneously says to take profit on (SN77/SN14/SN83).
+        #    Don't size it — keep it VISIBLE in a flagged note so nothing is hidden;
+        #    the entry call is the operator's, not an auto-ENTER. Held names are
+        #    exempt (a holding at its high is a TRIM decision, handled below).
+        if held_ids_known and sid0 not in held_set:
+            _tp = getattr(s, "take_profit_flags", None) or []
+            _ef = getattr(s, "entry_flags", None) or []
+            if _tp or any("CHASING" in str(fl).upper() for fl in _ef):
+                _why = "at/near high — take-profit zone" if _tp else "chasing — wait for pullback"
+                flagged_not_entered.append((sid0, getattr(s, "name", ""), _why))
+                continue
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
         tier = classify_tier(health, s_regime, policy)
@@ -347,6 +368,20 @@ def compute_target_allocation(
                 "reason": f"beyond_max_positions_{policy.max_positions}",
             })
         survivors = survivors[:policy.max_positions]
+
+    # ── Breadth-aware deploy ceiling: each surviving name backs at most
+    #    per_name_full_deploy of the account, so a thin book parks the remainder
+    #    in SN0 (residual) instead of over-concentrating. Only ever LOWERS f;
+    #    inert once survivors are plentiful (ceiling ≥ current f). ──
+    if survivors:
+        breadth_ceiling = len(survivors) * policy.per_name_full_deploy
+        if breadth_ceiling < f:
+            notes.append(
+                f"Breadth ceiling — only {len(survivors)} name(s) cleared the floor → "
+                f"deploy capped {f:.0%}→{breadth_ceiling:.0%} (≤{policy.per_name_full_deploy:.0%} "
+                f"each); the rest parks in SN0 rather than over-concentrating."
+            )
+            f = breadth_ceiling
 
     # ── Conviction weights → normalised fraction of DEPLOYED capital ──────────
     positions: list[TargetPosition] = []
@@ -436,6 +471,14 @@ def compute_target_allocation(
         notes.append("Macro Bear — ENTER/ADD actions are advisory; defer new exposure, prioritise the EXITs.")
     if suppressed_new:
         notes.append(f"{regime} macro — new entries suppressed ({suppressed_new} healthy non-held names held back); book limited to current holdings. Rotate in on Bull (see Opportunities).")
+    if flagged_not_entered:
+        _items = ", ".join(f"SN{sid} {nm} ({why})" for sid, nm, why in flagged_not_entered[:6])
+        _more = "" if len(flagged_not_entered) <= 6 else f" +{len(flagged_not_entered) - 6} more"
+        notes.append(
+            f"⚠️ {len(flagged_not_entered)} new name(s) FLAGGED, not auto-entered (your call): "
+            f"{_items}{_more}. Engine reads these as at-high / chasing — shown so you can act "
+            f"manually, but the allocator won't size an ENTER into a take-profit zone."
+        )
     if conviction_floored:
         notes.append(f"{conviction_floored} conviction-tagged vertical(s) floored at CV tier through the health cut — thesis-held at a toehold; would still exit on a Bear-regime flip.")
     if forced_conviction_exits:
