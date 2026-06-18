@@ -1029,10 +1029,10 @@ def run(
         if (bal_by_netuid and account_tao) else None
     )
     # Free (unstaked) TAO — cron-only enrichment, read SEPARATELY from the deploy
-    # base ON PURPOSE. account_tao above stays = STAKED so the allocator keeps
-    # sizing targets off *deployable* capital. Folding free in here would, with
-    # the deploy dial pinned at 100% (deploy_bands=((-9.99,1.00),)), make the plan
-    # recommend deploying the cash — the opposite of "park it". So free is
+    # base ON PURPOSE. account_tao above stays = STAKED so the allocator sizes
+    # targets off *deployable* staked capital. The deploy dial now parks a slice
+    # of that staked base into SN0 when the signal is soft; free TAO is a distinct
+    # cash line (TODO: fold into the dial as a separate lever). So free is
     # reported (digest + dashboard payload), not auto-deployed. Soft-fail → None.
     free_tao = None
     account_total_tao = account_tao
