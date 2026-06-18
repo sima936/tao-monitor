@@ -77,11 +77,11 @@ class AllocationPolicy:
     #    parks cash in SN0 but never force-flattens the book; hard exits are the
     #    stops'/Bear-regime's job, not the dial's.
     #    PLACEHOLDER numbers — Simon's risk call, Hermes-calibratable later
-    #    (narrow surface: four scalars). Worked example: signal -0.18 → ~73%.
+    #    (narrow surface: four scalars). Worked example: signal -0.18 → ~59%.
     deploy_signal_hi:  float = 0.00    # at/above this signal → full deploy
-    deploy_signal_lo:  float = -0.40   # at/below this signal → floor
+    deploy_signal_lo:  float = -0.30   # at/below this signal → floor
     deploy_ceiling:    float = 1.00    # max fraction deployed
-    deploy_floor:      float = 0.40    # min fraction deployed (rest → SN0)
+    deploy_floor:      float = 0.30    # min fraction deployed (rest → SN0)
     unknown_macro_fraction: float = 1.00   # macro unavailable → still fully deployed
 
     # ── Axis 2: tiering off health_score.
@@ -450,9 +450,14 @@ def compute_target_allocation(
             sid = int(getattr(s, "subnet_id"))
             tw = weights[sid]
             cur = None if current_weight_by_id is None else float(current_weight_by_id.get(sid, 0.0))
+            is_pending = sid in pending_meta
+            # A name pending bear-exit is on its way out — never size it UP. Cap
+            # its target at current so the toehold can only HOLD or TRIM toward
+            # exit, never ADD. The freed weight falls to SN0 via the residual.
+            if is_pending and cur is not None:
+                tw = min(tw, cur)
             drift = None if cur is None else (cur - tw)
             action, reason = _decide_action(cur, tw, drift, policy)
-            is_pending = sid in pending_meta
             if is_pending:
                 p_reason, p_elapsed = pending_meta[sid]
                 reason = (f"pending exit ({p_reason}) "
