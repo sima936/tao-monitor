@@ -163,6 +163,41 @@ def append_outcome_log(rows: list[dict], path: Path = OUTCOME_LOG_PATH) -> None:
 _ICON = {"HARD_STOP": "🛑", "TRAIL_STOP": "🔻", "REGIME_EXIT": "⚠️", "TP_TRIM": "✂️"}
 
 
+# ── Dial log — one row per cron capturing the macro signal → deployed-fraction
+#    decision. Separate from outcome_log (which is stop/TP/exit EVENTS); the dial
+#    is a continuous per-cron exposure call, not an event. fwd_return_* blank at
+#    write time, backfilled later (no lookahead) so Hermes can score the signal's
+#    information coefficient on the deploy ramp. ──────────────────────────────
+DIAL_LOG_PATH = Path(
+    os.environ.get(
+        "DIAL_LOG_PATH",
+        str(Path(__file__).parent / "dial_log.csv"),
+    )
+)
+
+DIAL_FIELDS = [
+    "dial_ts", "regime", "signal", "deployed_fraction", "sn0_target_weight",
+    "account_tao_staked", "free_tao",
+    "fwd_return_1d", "fwd_return_7d", "fwd_return_14d",
+]
+
+
+def append_dial_log(row: dict, path: Path = DIAL_LOG_PATH) -> None:
+    """Append one per-cron dial decision for pre-Hermes calibration. Non-fatal."""
+    if not row:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_file = (not path.exists()) or path.stat().st_size == 0
+        with path.open("a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=DIAL_FIELDS, extrasaction="ignore")
+            if new_file:
+                w.writeheader()
+            w.writerow({k: row.get(k, "") for k in DIAL_FIELDS})
+    except Exception:
+        pass  # never let the log kill the cycle
+
+
 def format_stop_alert(events: list[dict]) -> str:
     """The dedicated 🚨 ping — separate from the digest, exact unstake shown."""
     if not events:
