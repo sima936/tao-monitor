@@ -351,6 +351,8 @@ def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int],
 
     pnl: dict[int, float] = {}
     for h in holdings:
+        if h == 0:
+            continue  # root/SN0 is cash (1:1 τ) — P&L undefined; never book it
         pos = positions.get(str(h))
         if not pos:
             continue
