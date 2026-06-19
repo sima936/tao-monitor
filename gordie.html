@@ -849,7 +849,8 @@ function renderOpportunities(score) {
     if (m && m.regime && m.regime !== 'Unknown') {
       const reg = m.regime;
       const col = reg === 'Bear' ? 'var(--red)' : reg === 'Bull' ? 'var(--green)' : 'var(--gold)';
-      const note = reg === 'Bear'     ? 'no new entries — capital preservation (rank only)'
+      const note = m.stance ? m.stance
+                 : reg === 'Bear'     ? 'no new entries — capital preservation (rank only)'
                  : reg === 'Sideways' ? 'no new entries — hold conviction (rank only)'
                  : reg === 'Bull'     ? 'entries live — rotate actively'
                  : '';
