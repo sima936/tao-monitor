@@ -672,9 +672,13 @@ def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> 
     for p in pos:  # 🟠 TRIM
         if p.action == "trim":
             rungs.append(f"🟠 TRIM  SN{p.subnet_id} {p.name}  {move(p)}")
-    for p in pos:  # 🔴⏳ PENDING-SELL
+    for p in pos:  # 🔴⏳ PENDING-SELL — straight: regime + gate, no prose
         if p.pending_exit:
-            rungs.append(f"🔴⏳ EXITING SN{p.subnet_id} {p.name} — toehold, {clean(p.reason)} confirming")
+            last = (p.reason or "").split()[-1] if (p.reason or "").strip() else ""
+            gate = last if "/" in last else ""
+            desc = ", ".join(x for x in ((p.markov_regime or "").lower(), gate) if x)
+            tail = f" — {desc}" if desc else ""
+            rungs.append(f"🔴⏳ EXITING SN{p.subnet_id} {p.name}{tail}")
     for c in [c for c in plan.cut if c.get("action") == "EXIT"]:  # 🔴 SELL
         cw = c.get("current_weight")
         amt = f" unstake {cw*account_tao:.1f}τ ·" if (cw is not None and account_tao) else ""
