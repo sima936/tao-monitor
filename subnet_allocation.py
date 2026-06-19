@@ -620,16 +620,7 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
 def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> str:
     DOT = {"Bull": "🟢", "Bear": "🔴", "Sideways": "⚪"}
 
-    def stance(regime, signal):
-        r = (regime or "").lower()
-        if r == "bear": return "preserve capital"
-        if r == "bull":
-            if signal < -0.05: return "take profits, not entries"
-            if signal > 0.10:  return "risk-on"
-            return "selective"
-        if signal < -0.05: return "be selective"
-        if signal > 0.10:  return "lean in"
-        return "hold conviction"
+    from subnet_scoring_engine import macro_stance  # canonical stance (single source)
 
     def clean(reason):
         return (reason or "").replace("_regime", "").replace("_", " ").strip()
@@ -649,7 +640,7 @@ def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> 
     L = [
         "📊 TAO MONITOR",
         f"{DOT.get(plan.macro_regime, '❔')} {plan.macro_regime} · "
-        f"signal {plan.macro_signal:+.2f} · {stance(plan.macro_regime, plan.macro_signal)}",
+        f"signal {plan.macro_signal:+.2f} · {macro_stance(plan.macro_regime, plan.macro_signal)}",
         f"Deploy {plan.deployed_fraction:.0%} · cash SN0 "
         f"{plan.sn0_target_weight:.0%} ({tao(plan.sn0_target_weight)})",
         "",
