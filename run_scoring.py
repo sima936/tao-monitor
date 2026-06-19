@@ -63,6 +63,7 @@ from subnet_allocation import (
     compute_target_allocation,
     AllocationPolicy,
     format_allocation_plan,
+    format_actionable_digest,
 )
 from geckoterminal_fetch import fetch_history_for_netuids
 
@@ -1151,13 +1152,15 @@ def run(
         return {"timestamp": result.timestamp, "passed": result.passed_filters}
 
     # Build message
-    macro_header = format_macro_header(macro)
-    msg = format_telegram_alert(result, current_holdings=holdings, macro_header=macro_header,
-                                pnl_by_netuid=pnl_by_netuid)
-    if cost_basis:   # cron digest only — keep the 60s /status path lean (no alloc block)
-        msg += "\n\n" + format_allocation_plan(plan, account_tao=account_tao)
+    if cost_basis:
+        # Cron path — lean, action-only digest on the 7-rung ladder, sourced from
+        # `plan` (the object an execution agent consumes). Free-τ folded in.
+        # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
+        msg = format_actionable_digest(
+            plan, free_tao=free_tao, account_tao=account_tao, ts=result.timestamp[11:16],
+        )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
-        # fwd_return_* backfilled later — no lookahead. Non-fatal.
+        # fwd_return_* backfilled later — no lookahead. Non-fatal. (KEEP.)
         from datetime import datetime, timezone
         append_dial_log({
             "dial_ts": datetime.now(timezone.utc).isoformat(),
@@ -1168,27 +1171,11 @@ def run(
             "account_tao_staked": round(account_tao, 6) if account_tao else "",
             "free_tao": round(free_tao, 6) if free_tao is not None else "",
         })
-        if free_tao is not None and free_tao > 0.005:
-            f_dial = getattr(plan, "deployed_fraction", 1.0)
-            # Free cash follows the dial. A sub-ceiling (soft) signal is the
-            # system's "avoid entries" stance, so idle cash parks in SN0 for base
-            # yield + dry powder; only a full risk-on dial rotates it into the
-            # green book. Advisory — you stake manually (read-only stack, no keys).
-            if f_dial >= 0.999:
-                free_action = (
-                    f"🟢 Dial full risk-on — rotate free {free_tao:.2f}τ into the "
-                    f"green book per the targets above."
-                )
-            else:
-                free_action = (
-                    f"🅿️ Dial {f_dial:.0%} (soft) — stake free {free_tao:.2f}τ → SN0 "
-                    f"for base yield + dry powder. Rotate into greens on Bull."
-                )
-            msg += (
-                f"\n\n💰 Free/unstaked: {free_tao:.2f}τ · account total ≈ "
-                f"{account_total_tao:.1f}τ ({account_tao or 0.0:.1f} staked + "
-                f"{free_tao:.1f} free).\n{free_action}"
-            )
+    else:
+        # On-demand /status fast path — no cost basis / no plan; keep verbose render.
+        macro_header = format_macro_header(macro)
+        msg = format_telegram_alert(result, current_holdings=holdings,
+                                    macro_header=macro_header, pnl_by_netuid=pnl_by_netuid)
     print(msg)
 
     # Change detection — decide whether to send
