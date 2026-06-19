@@ -193,6 +193,11 @@ class TaoMacroState:
     bear_prob:     float
     strategy_mode: str
     available:     bool = True
+    stance:        str = ""   # canonical signal-aware stance (set in __post_init__)
+
+    def __post_init__(self):
+        if not self.stance:
+            self.stance = macro_stance(self.regime, self.signal)
 
 
 @dataclass
@@ -281,6 +286,35 @@ def _ema(prices: np.ndarray, period: int) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAO macro regime (parameter 2)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def macro_stance(regime, signal: float) -> str:
+    """Canonical, signal-aware macro stance — the SINGLE source every surface
+    renders (Telegram digest, dashboard banner, engine report), so the regime
+    LABEL and the forward SIGNAL can never give contradictory advice.
+
+    Accepts a MacroRegime or its name string. This is the one place the
+    label/signal reconciliation lives; renderers only format the result.
+    """
+    name = regime.value if isinstance(regime, MacroRegime) else str(regime or "")
+    r = name.strip().lower()
+    s = signal if signal is not None else 0.0
+    eps = MACRO_SIGNAL_DIVERGENCE_EPS
+    if not r or "unknown" in r:
+        return "macro unknown — hold, no new entries"
+    if "bear" in r:
+        return "defensive — watch for a turn" if s > eps else "preserve capital"
+    if "bull" in r:
+        if s < -eps:
+            return "take profits, not entries"
+        if s > 0.10:
+            return "risk-on — rotate actively"
+        return "selective"
+    if s < -eps:
+        return "be selective"
+    if s > 0.10:
+        return "lean in"
+    return "hold conviction"
+
 
 def compute_tao_macro(
     tao_prices: list[float],
@@ -1073,17 +1107,7 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
     # negative signal (momentum rolling over) — the canned regime advice is
     # misleading, so flag the divergence instead. Display-only: scoring and
     # allocation consume m.signal directly regardless of what this line says.
-    macro_advice = m.strategy_mode
-    if m.regime == MacroRegime.BULL and m.signal < -MACRO_SIGNAL_DIVERGENCE_EPS:
-        macro_advice = (
-            f"🟢 BULL state but signal {m.signal:+.2f} negative — momentum "
-            f"rolling over. Be selective; favour taking profits over new entries."
-        )
-    elif m.regime == MacroRegime.BEAR and m.signal > MACRO_SIGNAL_DIVERGENCE_EPS:
-        macro_advice = (
-            f"🔴 BEAR state but signal {m.signal:+.2f} positive — possible "
-            f"stabilisation. Stay defensive until the regime confirms a turn."
-        )
+    macro_advice = m.stance  # canonical signal-aware stance (single source)
 
     L = [
         "📊 TAO MONITOR — Portfolio Report",
@@ -1350,6 +1374,7 @@ def to_json(result) -> str:
             "bull_prob": round(macro.bull_prob, 4) if macro else None,
             "bear_prob": round(macro.bear_prob, 4) if macro else None,
             "strategy_mode": macro.strategy_mode if macro else "",
+            "stance": macro.stance if macro else "",
             "available": bool(macro.available) if macro else False,
         },
         "summary": {
