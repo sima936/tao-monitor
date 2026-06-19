@@ -608,3 +608,85 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
         lines.extend(f"• {n}" for n in plan.notes)
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lean action-only Telegram digest — the 7-rung ladder. Sourced ENTIRELY from
+# `plan` (the same object an execution agent consumes). Evidence (health, EMA,
+# Gini, pullback research, filter counts) lives on the dashboard; the 🚨 stop
+# ping stays a separate message. Self-contained — no new module-level names.
+# Forward-compatible `pending_entry` slot lights up when the entry-gate build
+# lands; until then it renders nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> str:
+    DOT = {"Bull": "🟢", "Bear": "🔴", "Sideways": "⚪"}
+
+    def stance(regime, signal):
+        r = (regime or "").lower()
+        if r == "bear": return "preserve capital"
+        if r == "bull":
+            if signal < -0.05: return "take profits, not entries"
+            if signal > 0.10:  return "risk-on"
+            return "selective"
+        if signal < -0.05: return "be selective"
+        if signal > 0.10:  return "lean in"
+        return "hold conviction"
+
+    def clean(reason):
+        return (reason or "").replace("_regime", "").replace("_", " ").strip()
+
+    def tao(w):
+        return f"{w*account_tao:.1f}τ" if account_tao else f"{w:.0%}"
+
+    def move(p):
+        if p.current_weight is None or account_tao is None:
+            return f"→ {p.target_weight:.0%} ({tao(p.target_weight)})"
+        d = abs(p.current_weight - p.target_weight) * account_tao
+        verb = "buy" if getattr(p, "pending_entry", False) else \
+            {"trim": "sell", "add": "buy", "enter": "buy"}.get(p.action, "move")
+        return f"{verb} ~{d:.1f}τ (→ {p.target_weight:.0%})"
+
+    pos = list(plan.positions)
+    L = [
+        "📊 TAO MONITOR",
+        f"{DOT.get(plan.macro_regime, '❔')} {plan.macro_regime} · "
+        f"signal {plan.macro_signal:+.2f} · {stance(plan.macro_regime, plan.macro_signal)}",
+        f"Deploy {plan.deployed_fraction:.0%} · cash SN0 "
+        f"{plan.sn0_target_weight:.0%} ({tao(plan.sn0_target_weight)})",
+        "",
+    ]
+    rungs = []
+    for p in pos:  # 🟢⏳ PENDING-BUY (forward-compat)
+        if getattr(p, "pending_entry", False):
+            rungs.append(f"🟢⏳ ENTERING SN{p.subnet_id} {p.name} — confirming ({move(p)})")
+    for p in pos:  # 🟢 ENTER
+        if p.action == "enter" and not getattr(p, "pending_entry", False):
+            rungs.append(f"🟢 ENTER SN{p.subnet_id} {p.name}  {move(p)}  ({clean(p.reason)})")
+    for p in pos:  # 🟢 ADD
+        if p.action == "add":
+            rungs.append(f"🟢 ADD   SN{p.subnet_id} {p.name}  {move(p)}")
+    holds = [p for p in pos if p.action == "hold" and not p.pending_exit
+             and not getattr(p, "pending_entry", False)]
+    if holds:  # ⚪ HOLD — bare regime dot per name (watching, at target)
+        names = " · ".join(f"{DOT.get(p.markov_regime, '❔')} {p.name}" for p in holds)
+        rungs.append(f"⚪ HOLD  {names}")
+    for p in pos:  # 🟠 TRIM
+        if p.action == "trim":
+            rungs.append(f"🟠 TRIM  SN{p.subnet_id} {p.name}  {move(p)}")
+    for p in pos:  # 🔴⏳ PENDING-SELL
+        if p.pending_exit:
+            rungs.append(f"🔴⏳ EXITING SN{p.subnet_id} {p.name} — toehold, {clean(p.reason)} confirming")
+    for c in [c for c in plan.cut if c.get("action") == "EXIT"]:  # 🔴 SELL
+        cw = c.get("current_weight")
+        amt = f" unstake {cw*account_tao:.1f}τ ·" if (cw is not None and account_tao) else ""
+        rungs.append(f"🔴 SELL  SN{c['subnet_id']} {c.get('name','')} —{amt} ({clean(c.get('reason',''))})")
+
+    L.extend(rungs if rungs else ["(no actions — book at target)"])
+    L.append("")
+    if free_tao is not None and free_tao > 0.005:
+        if plan.deployed_fraction >= 0.999:
+            L.append(f"🟢 Rotate free {free_tao:.2f}τ → greens (dial full risk-on)")
+        else:
+            L.append(f"🅿️ Park free {free_tao:.2f}τ → SN0 (dial {plan.deployed_fraction:.0%}, soft)")
+    acct = f" · acct ~{account_tao:.1f}τ" if account_tao else ""
+    L.append(f"⏰ {ts or '—'}{acct} · details → dashboard")
+    return "\n".join(L)
