@@ -1040,26 +1040,32 @@ def run(
     # ── Allocation layer ("be Siam"): score → size. Targets always compute;
     # Drift + per-name actions only when balances are known (cron / threaded). ─
     account_tao = sum(bal_by_netuid.values()) if bal_by_netuid else None
-    current_weight_by_id = (
-        {sid: b / account_tao for sid, b in bal_by_netuid.items()}
-        if (bal_by_netuid and account_tao) else None
-    )
-    # Free (unstaked) TAO — cron-only enrichment, read SEPARATELY from the deploy
-    # base ON PURPOSE. account_tao above stays = STAKED so the allocator sizes
-    # targets off *deployable* staked capital. The deploy dial now parks a slice
-    # of that staked base into SN0 when the signal is soft; free TAO is a distinct
-    # cash line (TODO: fold into the dial as a separate lever). So free is
-    # reported (digest + dashboard payload), not auto-deployed. Soft-fail → None.
+
+    # Free (unstaked) TAO — folded into the dial base so the deploy fraction and
+    # per-name drifts compute on the WHOLE tradeable account (staked + free), not
+    # staked-only. A large free balance (e.g. just after trims) otherwise
+    # undersizes the base and every held name reads over-target → phantom trims.
+    # Free sits on the parked (cash) side of the dial; the 🅿️ line still moves it
+    # into SN0 as tidy-up, which doesn't change the base. Fast path (no cost
+    # basis) → free None → base = staked, behaviour unchanged. Soft-fail → None.
     free_tao = None
-    account_total_tao = account_tao
     if cost_basis and bal_by_netuid:
         free_tao = client.get_free_balance_tao()
-        if free_tao is not None:
-            account_total_tao = (account_tao or 0.0) + free_tao
-            logger.info(
-                f"Account: staked {account_tao or 0.0:.3f}τ + free {free_tao:.3f}τ "
-                f"= total {account_total_tao:.3f}τ"
-            )
+
+    account_total_tao = account_tao
+    if free_tao is not None:
+        account_total_tao = (account_tao or 0.0) + free_tao
+        logger.info(
+            f"Account: staked {account_tao or 0.0:.3f}τ + free {free_tao:.3f}τ "
+            f"= dial base {account_total_tao:.3f}τ"
+        )
+
+    # Drift measured against the whole account (staked + free): undeployed free
+    # counts as parked cash rather than shrinking the base under the held names.
+    current_weight_by_id = (
+        {sid: b / account_total_tao for sid, b in bal_by_netuid.items()}
+        if (bal_by_netuid and account_total_tao) else None
+    )
     # Size only REAL-DATA subnets: the enrichment `targets` (holdings + watchlist
     # + movers that received real history/Gini) ∪ holdings. Excludes the ~100
     # placeholder-history subnets whose health scores aren't trustworthy — those
@@ -1124,7 +1130,7 @@ def run(
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
-        account_tao=account_tao,
+        account_tao=account_total_tao,
         current_weight_by_id=current_weight_by_id,
         cut_since=cut_since_in,                  # OPEN #6 — persistent confirmation streak
         now_ts=time.time(),
@@ -1170,7 +1176,7 @@ def run(
         # `plan` (the object an execution agent consumes). Free-τ folded in.
         # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
         msg = format_actionable_digest(
-            plan, free_tao=free_tao, account_tao=account_tao, ts=result.timestamp[11:16],
+            plan, free_tao=free_tao, account_tao=account_total_tao, ts=result.timestamp[11:16],
         )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
         # fwd_return_* backfilled later — no lookahead. Non-fatal. (KEEP.)
