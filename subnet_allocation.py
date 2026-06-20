@@ -92,6 +92,11 @@ class AllocationPolicy:
     new_entries_only_in_bull: bool = True  # Sideways/Bear/Unknown macro → no NEW (un-held) names
                                            # in the book; rotate in only on Bull. Discovery lives
                                            # on the Opportunities tab, not the allocation plan.
+    entry_signal_floor: float = -0.05      # also block NEW entries when the macro signal is
+                                           # firmly negative, even in a Bull LABEL — mirrors the
+                                           # engine's macro_allows_entries (= MACRO_SIGNAL_DIVERGENCE_EPS)
+                                           # so the plan can't ENTER while the buy list says WATCH ONLY.
+                                           # Holdings are unaffected (still held/trimmed/cut).
 
     # ── Conviction guard. Named real-utility verticals are exempt from the
     #    MARGINAL health-floor cut (NOT the Bear-regime cut): instead of →SN0
@@ -283,7 +288,9 @@ def compute_target_allocation(
     # no-op (run() already feeds holdings-only there).
     held_ids_known = current_weight_by_id is not None
     held_set = {sid for sid, w in (current_weight_by_id or {}).items() if w and w > 0}
-    allow_new_entries = (regime == "Bull") or (not policy.new_entries_only_in_bull)
+    allow_new_entries = (
+        (regime == "Bull") or (not policy.new_entries_only_in_bull)
+    ) and (signal >= policy.entry_signal_floor)
     suppressed_new = 0
     conviction_floored = 0
     flagged_not_entered: list = []   # un-held names the engine reads as chasers/exit-zones:
