@@ -323,16 +323,24 @@ def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
 
 def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int],
                          bal_by_netuid: dict[int, float] | None = None) -> dict | None:
-    """Map each held netuid → realised+unrealised P&L fraction vs net-invested.
+    """Map each held netuid → realised+unrealised P&L fraction on GROSS invested.
 
-        pnl[netuid] = (current balance_as_tao − net_invested) / net_invested
+        pnl[netuid] = (balance_as_tao + tao_out − tao_in) / tao_in
+                    = (balance_as_tao − net_invested)       / tao_in
 
-    net_invested comes from the cost-basis dict (fetch_cost_basis). Current
-    balances are reused from `bal_by_netuid` when supplied (no extra call —
-    threaded from the cycle's single get_wallet_stakes); otherwise fetched here.
-    House-money / zero-basis positions (net_invested <= 0, e.g. SN0 Root) are
-    skipped — P&L% is undefined there. Returns None on a fetch failure so the
-    Telegram formatter cleanly falls back to its EMA gate.
+    Denominator is GROSS invested (tao_in), not net-invested (tao_in − tao_out).
+    This is trim-invariant: realised proceeds (tao_out) are credited in the
+    numerator via net_invested, so taking profit can never shrink the
+    denominator and inflate the %. (The old net-invested divisor made a trimmed
+    position's loss/gain explode — a phantom hard stop on a name you'd just
+    taken profit on, and a phantom +74% on a +20% winner.)
+
+    tao_in / tao_invested come from the cost-basis dict (fetch_cost_basis).
+    Current balances are reused from `bal_by_netuid` when supplied (no extra
+    call — threaded from the cycle's single get_wallet_stakes); otherwise
+    fetched here. Zero-basis positions (tao_in <= 0, e.g. SN0 Root) are skipped —
+    P&L% is undefined there. Returns None on a fetch failure so the Telegram
+    formatter cleanly falls back to its EMA gate.
     """
     positions = (cost_basis or {}).get("positions", {})
     if not positions:
@@ -358,12 +366,17 @@ def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int],
         if not pos:
             continue
         net_inv = _f(pos.get("tao_invested"))
-        if net_inv is None or net_inv <= 0:   # house money / no basis → undefined
+        gross_in = _f(pos.get("tao_in"))
+        if gross_in is None or gross_in <= 0:   # no buy basis (e.g. SN0) → undefined
             continue
+        if net_inv is None:
+            net_inv = gross_in  # no tao_out info → net == gross
         bal = bal_by_netuid.get(h)
         if bal is None:
             continue
-        pnl[h] = (bal - net_inv) / net_inv
+        # Trim-invariant: (bal − net_inv) credits realised proceeds; divide by
+        # GROSS invested so a trim can't shrink the base and inflate the %.
+        pnl[h] = (bal - net_inv) / gross_in
 
     if pnl:
         logger.info("P&L gate: " + ", ".join(f"SN{k} {v*100:+.0f}%" for k, v in pnl.items()))
