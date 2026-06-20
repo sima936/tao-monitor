@@ -1073,14 +1073,22 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   const totalGbp = totalTao * gbp;
 
   // Totals only over positions with a known cost basis, so the % is fair.
-  let totalInvested = 0, totalValueWithCost = 0;
+  // τ P&L sums (value − net_invested); the % divides by GROSS invested (Σ tao_in)
+  // so trims don't shrink the base and inflate the book-level figure.
+  let totalInvested = 0, totalGrossIn = 0, totalValueWithCost = 0;
   positions.forEach(p => {
     const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
+    if (p.netuid === 0) return;
     const inv = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
-    if (inv != null && inv > 0) { totalInvested += inv; totalValueWithCost += p.tao; }
+    const grossIn = (cb && cb.tao_in != null) ? Number(cb.tao_in) : null;
+    if (grossIn != null && grossIn > 0) {
+      totalInvested += (inv != null ? inv : grossIn);
+      totalGrossIn += grossIn;
+      totalValueWithCost += p.tao;
+    }
   });
-  const totalPnl = totalInvested > 0 ? (totalValueWithCost - totalInvested) : null;
-  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : null;
+  const totalPnl = totalGrossIn > 0 ? (totalValueWithCost - totalInvested) : null;
+  const totalPnlPct = totalGrossIn > 0 ? (totalPnl / totalGrossIn) * 100 : null;
 
   document.getElementById('port-total-tao').textContent = totalTao.toFixed(2) + 'τ';
   document.getElementById('port-total-gbp').textContent = '£' + totalGbp.toLocaleString(undefined, {maximumFractionDigits: 0});
@@ -1147,12 +1155,16 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
 
     const cb = cbPos[p.netuid] ?? cbPos[String(p.netuid)];
     let invested = (cb && cb.tao_invested != null) ? Number(cb.tao_invested) : null;
+    let grossIn = (cb && cb.tao_in != null) ? Number(cb.tao_in) : null;
     // Root/SN0 is cash (1:1 TAO) — no P&L. Guards against a phantom P&L when a
     // stake-in isn't yet booked in cost basis (Taostats indexing lag) and keeps
     // root out of the total-P&L aggregate below.
-    if (p.netuid === 0) invested = null;
+    if (p.netuid === 0) { invested = null; grossIn = null; }
     const pnl = invested != null ? (p.tao - invested) : null;
-    const pnlPct = (invested != null && invested > 0) ? (pnl / invested) * 100 : null;
+    // % on GROSS invested (tao_in), not net — trim-invariant: a trim raises
+    // tao_out and would otherwise shrink the base and inflate the figure. The τ
+    // P&L and the bar break-even line stay anchored to net_invested.
+    const pnlPct = (pnl != null && grossIn != null && grossIn > 0) ? (pnl / grossIn) * 100 : null;
 
     html += `<tr>
       <td><strong>SN${p.netuid}</strong> ${p.name}</td>
