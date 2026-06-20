@@ -1049,14 +1049,28 @@ def run(
     # into SN0 as tidy-up, which doesn't change the base. Fast path (no cost
     # basis) → free None → base = staked, behaviour unchanged. Soft-fail → None.
     free_tao = None
+    balance_total_tao = None
     if cost_basis and bal_by_netuid:
-        free_tao = client.get_free_balance_tao()
+        acct = client.get_account_balances()
+        if acct and acct.get("total") is not None:
+            balance_total_tao = acct["total"]
+            # Free as a RESIDUAL vs the live staked positions, NOT a direct
+            # balance_free read. balance_total is invariant through a park, while
+            # the positions sum updates immediately — so free self-corrects to ~0
+            # the moment a park lands, instead of double-counting (staked +
+            # lagging balance_free = the 43.2τ phantom). Clamp ≥ 0 against any
+            # valuation noise between the two endpoints.
+            free_tao = max(0.0, balance_total_tao - (account_tao or 0.0))
+        else:
+            # Fallback: account endpoint unavailable → best-effort direct read.
+            free_tao = client.get_free_balance_tao()
 
     account_total_tao = account_tao
     if free_tao is not None:
         account_total_tao = (account_tao or 0.0) + free_tao
         logger.info(
             f"Account: staked {account_tao or 0.0:.3f}τ + free {free_tao:.3f}τ "
+            f"(residual; balance_total {balance_total_tao if balance_total_tao is not None else 'n/a'}) "
             f"= dial base {account_total_tao:.3f}τ"
         )
 
@@ -1153,6 +1167,7 @@ def run(
         _payload["allocation"] = plan.to_dict()
         _payload["free_tao"] = free_tao
         _payload["account_total_tao"] = account_total_tao
+        _payload["balance_total_tao"] = balance_total_tao
         payload_json = json.dumps(_payload)
     except Exception as e:
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
