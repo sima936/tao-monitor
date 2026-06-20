@@ -316,6 +316,24 @@ def macro_stance(regime, signal: float) -> str:
     return "hold conviction"
 
 
+def macro_allows_entries(regime, signal: float) -> bool:
+    """Single source for 'are new entries on the table this run' — the gate the
+    buy section keys off, kept consistent with macro_stance() so the advice line
+    and the buy list can never disagree (the regime LABEL alone is not enough:
+    a Bull label with a firmly negative forward signal is take-profits, not a
+    buy). No new entries when: Bear, unknown, or signal firmly negative."""
+    name = regime.value if isinstance(regime, MacroRegime) else str(regime or "")
+    r = name.strip().lower()
+    s = signal if signal is not None else 0.0
+    if not r or "unknown" in r:
+        return False
+    if "bear" in r:
+        return False
+    if s < -MACRO_SIGNAL_DIVERGENCE_EPS:
+        return False
+    return True
+
+
 def compute_tao_macro(
     tao_prices: list[float],
     tao_timestamps: Optional[list[str]] = None,
@@ -1204,7 +1222,7 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
             and not any("CHASING" in fl for fl in s.entry_flags)
         ]
         candidates.sort(key=lambda s: s.entry_score, reverse=True)
-        if m.regime == MacroRegime.BULL:
+        if macro_allows_entries(m.regime, m.signal):
             L.append("🟢 BUY THE PULLBACK")
             # Concentration guard: if the shown candidates carry the 0.5 Gini
             # placeholder (no real concentration fetched — the /status
@@ -1217,7 +1235,10 @@ def format_telegram_alert(result, current_holdings=None, macro_header=None,
                     "buying; known-concentrated names are not excluded here."
                 )
         else:
-            L.append("👀 WATCH ONLY — hold, don't add (macro not bullish)")
+            # Bull label but signal says take-profits (or neutral/negative
+            # macro): demote to a watchlist and echo the canonical stance so
+            # the buy section can never contradict the header line above.
+            L.append(f"👀 WATCH ONLY — {m.stance} (not entries this run)")
         shown = 0
         for s in candidates[:result.top_n]:
             tag = "pullback" if any("PULLBACK" in fl for fl in s.entry_flags) else "neutral"
