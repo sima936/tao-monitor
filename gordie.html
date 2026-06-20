@@ -1097,7 +1097,19 @@ function renderPortfolio(stakeData, priceData, nameByNetuid, costBasis, score) {
   const freeEl = document.getElementById('port-free-tao');
   const freeSubEl = document.getElementById('port-free-sub');
   if (freeEl) {
-    const freeTao = (score && score.free_tao != null) ? Number(score.free_tao) : null;
+    // Derive free as a RESIDUAL against the LIVE staked sum using the invariant
+    // balance_total carried from the cron. balance_total doesn't change when free
+    // is parked into SN0 (only the free/staked split does), so the moment a park
+    // shows up in live positions, free self-corrects to ~0 — instead of adding a
+    // stale cron free_tao on top of the freshly-grown staked total (the 43.2τ
+    // phantom). Falls back to the raw free_tao if balance_total isn't present.
+    const balanceTotal = (score && score.balance_total_tao != null) ? Number(score.balance_total_tao) : null;
+    let freeTao;
+    if (balanceTotal != null && isFinite(balanceTotal)) {
+      freeTao = Math.max(0, balanceTotal - totalTao);
+    } else {
+      freeTao = (score && score.free_tao != null) ? Number(score.free_tao) : null;
+    }
     if (freeTao != null && isFinite(freeTao)) {
       freeEl.className = 'card-value' + (freeTao > 0.01 ? ' gold' : '');
       freeEl.textContent = freeTao.toFixed(2) + 'τ';
