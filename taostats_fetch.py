@@ -251,6 +251,44 @@ class TaostatsClient:
             logger.warning(f"Free-balance read failed (non-fatal): {e}")
             return None
 
+    def get_account_balances(self, coldkey: str = DEFAULT_COLDKEY) -> Optional[dict]:
+        """Coldkey balances in TAO from a SINGLE account snapshot:
+        {"free":.., "staked":.., "root":.., "total":..} (rao ÷ 1e9), or None.
+
+        Why this exists alongside get_free_balance_tao: account-total must NOT be
+        computed as (staked positions sum) + (balance_free), because those come
+        from two different endpoints that desync during a stake move — right
+        after parking free→SN0 the positions read updates but balance_free lags,
+        so the same TAO is counted twice (the 43.2τ phantom). balance_total is
+        INVARIANT through a park (TAO just shifts free→staked within one total),
+        so it's the safe basis for the account total and for deriving free as a
+        residual against the live staked sum.
+
+        Pure enrichment: returns None on ANY failure so a missing read can never
+        break a cycle.
+        """
+        try:
+            data = self.get(ACCOUNT_LATEST, params={"address": coldkey, "limit": 1})
+            rows = data.get("data", [])
+            if not rows:
+                logger.warning("Account-balance read: empty response — skipping.")
+                return None
+            r = rows[0]
+
+            def _tao(key: str) -> Optional[float]:
+                v = r.get(key)
+                return float(v) / 1e9 if v is not None else None
+
+            return {
+                "free": _tao("balance_free"),
+                "staked": _tao("balance_staked"),
+                "root": _tao("balance_staked_root"),
+                "total": _tao("balance_total"),
+            }
+        except Exception as e:  # noqa: BLE001 — enrichment must never be fatal
+            logger.warning(f"Account-balance read failed (non-fatal): {e}")
+            return None
+
     def get_delegation_events(
         self,
         nominator: str = DEFAULT_COLDKEY,
