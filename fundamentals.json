@@ -1,0 +1,79 @@
+{
+  "_meta": {
+    "schema": 1,
+    "purpose": "Fundamental conviction layer for TAO Monitor. Qualitative reads authored by Claude/Simon, surfaced (NOT auto-generated) by the cron. Slow-moving — updated on review, not every cycle.",
+    "verdicts": ["ACCUMULATE", "KEEP", "WATCH", "AVOID"],
+    "conviction": ["High", "Medium-High", "Medium", "Low"],
+    "real_customer": ["yes", "partial", "no"],
+    "staleness_days": 45,
+    "note": "Each read is stamped with 'reviewed'. The cron flags a read older than staleness_days, and pings on quant-vs-verdict divergence (e.g. AVOID name with rising net TAO inflow = promo pump; KEEP name with falling usage = re-review)."
+  },
+  "subnets": {
+    "9": {
+      "name": "IOTA",
+      "what": "Decentralized LLM pretraining (swarm / pipeline-parallel)",
+      "team": "Macrocosmos — established multi-subnet team; arXiv primer, Train-at-Home app",
+      "verdict": "ACCUMULATE",
+      "conviction": "High",
+      "real_customer": "no",
+      "traction": "High — real training, active miners, credible research",
+      "why": "Top-tier team and execution. Open question: who ultimately pays for the models (research infra, pre-revenue).",
+      "reviewed": "2026-06-22"
+    },
+    "4": {
+      "name": "Targon",
+      "what": "Confidential GPU compute for regulated industries (TVM)",
+      "team": "Manifold Labs — Rob Myers (ex-OTF core), James Woodman (ex-OTF COO)",
+      "verdict": "KEEP",
+      "conviction": "High",
+      "real_customer": "partial",
+      "traction": "High — ~#2 mcap, hundreds of miners",
+      "why": "Real team, real scale, genuine commercial angle. Upside capped by size (already large).",
+      "reviewed": "2026-06-22"
+    },
+    "44": {
+      "name": "Score",
+      "what": "Decentralized computer vision for sports (football)",
+      "team": "Score Technologies (Max Sebti); live product scorevision.io",
+      "verdict": "KEEP",
+      "conviction": "Medium-High",
+      "real_customer": "yes",
+      "traction": "Medium — live product, Reading FC partner; adoption proof still limited",
+      "why": "Rare real external customer (Reading FC); 19MB model beat frontier on a detection benchmark. Your -15% is entry-price, not quality.",
+      "reviewed": "2026-06-22"
+    },
+    "68": {
+      "name": "NOVA",
+      "what": "Decentralized drug discovery (molecule screening)",
+      "team": "Metanova Labs — CEO Micaela Bazo, crypto-native biotech",
+      "verdict": "WATCH",
+      "conviction": "Medium",
+      "real_customer": "no",
+      "traction": "Medium — ~4.8M molecules / 7k targets screened; pre-clinical",
+      "why": "Huge TAM, credible team, real activity — but most speculative on outcomes (drug discovery is long, ~90% fail). Size small.",
+      "reviewed": "2026-06-22"
+    },
+    "3": {
+      "name": "Teutonic",
+      "what": "Frontier decentralized LLM training (ex-Templar)",
+      "team": "Teutonic — led by Jacob Steeves ('Const'), Bittensor founder; lineage Covenant Labs (Covenant-72B)",
+      "verdict": "WATCH",
+      "conviction": "High",
+      "real_customer": "no",
+      "traction": "High — Covenant-72B delivered; 80B run live",
+      "why": "Best pedigree in the set (founder-led). Cautions: Templar->Teutonic leadership transition; price ran ~194% on the news — wait for an entry.",
+      "reviewed": "2026-06-22"
+    },
+    "110": {
+      "name": "Green Compute",
+      "what": "ESG / green-verified enterprise inference marketplace",
+      "team": "Josh Riddett (Easy Crypto Hunter, UK GPU-mining); lead investors DSV — Siam Kidd, Mark Creaser",
+      "verdict": "AVOID",
+      "conviction": "Low",
+      "real_customer": "no",
+      "traction": "None — ~1 miner, ~0 volume",
+      "why": "Promoter-backed (DSV/Siam), pre-traction; stock-photo testimonials and implausible certs. Revisit only on real usage + published buyback tx hashes.",
+      "reviewed": "2026-06-22"
+    }
+  }
+}
