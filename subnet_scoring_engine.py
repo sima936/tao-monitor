@@ -371,9 +371,16 @@ def apply_pre_filters(m: SubnetMetrics) -> FilterResult:
         return FilterResult.FAIL_POOL_MIN
     if m.pool_depth > MAX_POOL_DEPTH:
         return FilterResult.FAIL_POOL_MAX
-    # if m.genie_score >= MAX_GENIE_SCORE:
-    #     return FilterResult.FAIL_GENIE
-        
+    # Concentration hard gate (TO-DO #3 — re-enabled). Reject on a REAL Gini at
+    # or above MAX_GENIE_SCORE. The 0.5 sentinel = concentration NOT fetched (no
+    # metagraph yet) — not a real reading — so it is NOT rejected here: unfetched
+    # names pass the scanner (surfaced as "verify Gini") and are blocked at the
+    # ENTER layer instead, so we don't gut the universe on un-fetched names. Real
+    # values reach this point via apply_gini_overrides (last-good cache + fresh
+    # fetch), which runs before scoring.
+    if abs(m.genie_score - 0.5) > 1e-9 and m.genie_score >= MAX_GENIE_SCORE:
+        return FilterResult.FAIL_GENIE
+
     return FilterResult.PASS
 
 
