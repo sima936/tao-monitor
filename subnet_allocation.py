@@ -291,6 +291,10 @@ def compute_target_allocation(
     allow_new_entries = (
         (regime == "Bull") or (not policy.new_entries_only_in_bull)
     ) and (signal >= policy.entry_signal_floor)
+    # No NET BUYING on a firmly-negative signal: not just new entries, but ADDs to
+    # held names too. A take-profit signal should harvest/hold, never top up — so
+    # freed capital (trims/exits) parks in SN0 instead of growing a winner.
+    allow_buys = signal >= policy.entry_signal_floor
     suppressed_new = 0
     conviction_floored = 0
     flagged_not_entered: list = []   # un-held names the engine reads as chasers/exit-zones:
@@ -341,6 +345,17 @@ def compute_target_allocation(
             if _tp or any("CHASING" in str(fl).upper() for fl in _ef):
                 _why = "at/near high — take-profit zone" if _tp else "chasing — wait for pullback"
                 flagged_not_entered.append((sid0, getattr(s, "name", ""), _why))
+                continue
+            # Concentration fail-closed at the ENTER layer: a NEW name may only be
+            # entered if its REAL concentration is known. Unknown (0.5 placeholder
+            # / None) → don't auto-enter on unverified concentration; keep it
+            # visible. The #3 pre-filter already drops REAL ≥0.85, so this guards
+            # only the unfetched case. Held names are exempt (managed by trim/exit).
+            _g = getattr(s, "genie_score_raw", None)
+            if _g is None or abs(_g - 0.5) < 1e-9:
+                flagged_not_entered.append(
+                    (sid0, getattr(s, "name", ""), "verify Gini — concentration not fetched")
+                )
                 continue
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
@@ -464,6 +479,13 @@ def compute_target_allocation(
             if is_pending and cur is not None:
                 tw = min(tw, cur)
             drift = None if cur is None else (cur - tw)
+            # No NET BUYING on a firmly-negative signal (#1a): cap the target at
+            # current so an under-target holding HOLDs instead of ADDing, and the
+            # capital freed by trims/exits falls to SN0 rather than topping up a
+            # winner. Recompute drift after the cap. Mirrors the pending-exit cap.
+            if (not allow_buys) and cur is not None:
+                tw = min(tw, cur)
+                drift = cur - tw
             action, reason = _decide_action(cur, tw, drift, policy)
             if is_pending:
                 p_reason, p_elapsed = pending_meta[sid]
