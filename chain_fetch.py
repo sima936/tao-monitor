@@ -30,6 +30,11 @@ from typing import Optional
 
 logger = logging.getLogger("chain_fetch")
 
+import sys as _sys
+def _diag(msg: str) -> None:
+    """Print to stderr so bittensor's logging takeover can't mute it."""
+    print(f"[chain_fetch] {msg}", file=_sys.stderr, flush=True)
+
 # Simon's coldkey (public address — same default as taostats_fetch.DEFAULT_COLDKEY).
 DEFAULT_COLDKEY = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
 DEFAULT_NETWORK = "finney"
@@ -77,6 +82,7 @@ def get_wallet_stakes_via_chain(
         import bittensor as bt
     except Exception as e:  # SDK not installed (e.g. dep not yet added)
         logger.info(f"chain_fetch: bittensor SDK unavailable ({e}) — caller falls back")
+        _diag(f"SDK UNAVAILABLE ({e}) -> falling back to taostats")
         return None
 
     try:
@@ -88,13 +94,29 @@ def get_wallet_stakes_via_chain(
             f"chain_fetch: read {len(balances)} positions for "
             f"{coldkey[:6]}…{coldkey[-4:]} via chain RPC (free, read-only)"
         )
+        _diag(f"OK — {len(balances)} positions via chain RPC (free): "
+              f"{sorted(balances)} | total {sum(balances.values()):.3f}\u03c4")
         return balances
     except Exception as e:
         logger.warning(f"chain_fetch: chain read failed ({e}) — caller falls back to taostats")
+        _diag(f"CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back to taostats")
         return None
 
 
 if __name__ == "__main__":
-    import json
-    logging.basicConfig(level=logging.INFO)
-    print(json.dumps(get_wallet_stakes_via_chain(), indent=2))
+    import json, traceback
+    _diag("=== SELF-TEST START ===")
+    try:
+        res = get_wallet_stakes_via_chain()
+    except Exception as exc:  # should not happen — fn fails closed
+        _diag(f"UNEXPECTED RAISE: {exc}")
+        traceback.print_exc()
+        raise SystemExit(2)
+    if res is None:
+        _diag("RESULT: None (chain unavailable / SDK missing) -> taostats fallback would run")
+        raise SystemExit(1)
+    if not res:
+        _diag("RESULT: {} (chain reachable but ZERO positions parsed for this coldkey)")
+        raise SystemExit(1)
+    _diag(f"RESULT: {len(res)} positions, total {sum(res.values()):.3f}\u03c4 — chain read WORKS")
+    print(json.dumps(res, indent=2))
