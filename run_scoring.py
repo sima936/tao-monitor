@@ -922,10 +922,22 @@ def run(
     # Fetch subnet data
     client = TaostatsClient(api_key=api_key)
     try:
-        all_metrics = fetch_all_subnet_metrics(
-            client,
-            fetch_concentration=fetch_concentration,
-        )
+        # PRIMARY: free subnet metrics from chain (all_subnets): price, pool
+        # depth, volume. None -> fall back to taostats (costs credits).
+        all_metrics = None
+        try:
+            from chain_fetch import fetch_all_subnet_metrics_via_chain
+            all_metrics = fetch_all_subnet_metrics_via_chain()
+        except Exception as ce:
+            logger.warning(f"Chain metrics errored ({ce}) — falling back to taostats")
+            all_metrics = None
+        if all_metrics:
+            logger.info(f"Subnet metrics via chain: {len(all_metrics)} subnets (free)")
+        else:
+            all_metrics = fetch_all_subnet_metrics(
+                client,
+                fetch_concentration=fetch_concentration,
+            )
     except Exception as e:
         logger.error(f"Data fetch failed: {e}")
         # We return here BEFORE any save_state / dashboard push, so the last good
