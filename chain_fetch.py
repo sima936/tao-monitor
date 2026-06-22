@@ -191,10 +191,13 @@ def _dynamicinfos_to_metrics(subnets):
         price = _as_float(getattr(di, "price", 0.0))
         depth = _as_float(getattr(di, "tao_in", 0.0))
         vol = _as_float(getattr(di, "subnet_volume", 0.0))
-        mv = _as_float(getattr(di, "moving_price", 0.0))
-        pct_1w = ((price / mv - 1.0) * 100.0) if (mv and mv > 0) else 0.0
-        pct_1d = pct_1w / 7.0
-        hist = _synthetic_history(price, pct_1d, pct_1w)
+        # FLAT synthetic history (no fabricated trend). Deriving a per-subnet
+        # trend from price-vs-moving_price invented bearish regimes in a
+        # pullback, flipping held names to EXIT -> a "sell everything" digest.
+        # A single snapshot has no honest trend; regime stays Sideways and the
+        # macro (CoinGecko) signal does portfolio-level risk-off. Real per-
+        # subnet history is a separate (v2) job.
+        hist = _synthetic_history(price, 0.0, 0.0)
         ts = [(now - _dt.timedelta(days=(len(hist) - 1 - i))).isoformat()
               for i in range(len(hist))]
         name = getattr(di, "subnet_name", None)
