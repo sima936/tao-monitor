@@ -518,10 +518,16 @@ def compute_target_allocation(
             if c["subnet_id"] in held_ids:
                 c["action"] = "EXIT"
                 c["current_weight"] = round(float(current_weight_by_id[c["subnet_id"]]), 4)
-        # held but neither a target nor in cut (shouldn't happen, but be safe)
-        for sid in held_ids - target_ids - cut_ids:
-            cut.append({"subnet_id": sid, "name": "", "reason": "not_eligible",
-                        "action": "EXIT", "current_weight": round(float(current_weight_by_id[sid]), 4)})
+        # SAFETY: a held name that fell out of the scored set this cycle must be
+        # HELD, never auto-liquidated. Defaulting "shouldn't happen" to EXIT
+        # force-sold the whole book when holdings dropped from the ranked set.
+        _unscored_held = sorted(held_ids - target_ids - cut_ids)
+        for sid in _unscored_held:
+            cut.append({"subnet_id": sid, "name": "", "reason": "unscored_hold",
+                        "action": "HOLD", "current_weight": round(float(current_weight_by_id[sid]), 4)})
+        if _unscored_held:
+            notes.append(f"\u26a0\ufe0f {len(_unscored_held)} held name(s) unscored this cycle "
+                         f"\u2014 HELD, not sold (investigate pre-filter): {_unscored_held}")
 
     deployed_total = sum(p.target_weight for p in positions)
     sn0_target = max(0.0, 1.0 - deployed_total)
