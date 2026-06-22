@@ -362,9 +362,17 @@ def compute_tao_macro(
 # Pre-filters (hard gates — unchanged from Siam)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_pre_filters(m: SubnetMetrics) -> FilterResult:
+def apply_pre_filters(m: SubnetMetrics, is_held: bool = False) -> FilterResult:
     if len(m.price_history) < SUBNET_WINDOW + 2:
         return FilterResult.FAIL_NO_DATA
+    # A name you ALREADY HOLD is managed by the tier/stop logic, not the ENTRY
+    # gates. price>=MAX and pool>MAX are "don't ENTER" rules; applying them to a
+    # holding drops it from the scored set, and the allocator then sweeps the
+    # missing holding to a not_eligible auto-EXIT — force-selling a winner whose
+    # price rose or whose pool grew. Held names skip the entry gates and get
+    # scored so the real hold/trim/exit logic decides their fate.
+    if is_held:
+        return FilterResult.PASS
     if m.token_price >= MAX_TOKEN_PRICE:
         return FilterResult.FAIL_PRICE
     if m.pool_depth < MIN_POOL_DEPTH:
@@ -886,6 +894,7 @@ def run_scoring_cycle(
     tao_timestamps: Optional[list[str]] = None,
     top_n: int = 10,
     macro: Optional[TaoMacroState] = None,
+    holdings: Optional[list[int]] = None,
 ) -> ScoringResult:
     # Accept pre-computed macro (from tao_macro.json) or compute from raw prices.
     # Pre-computed path is preferred — avoids re-running Markov on every cycle.
@@ -894,8 +903,9 @@ def run_scoring_cycle(
     scored: list[SubnetScore] = []
     filtered_out: list[dict] = []
 
+    held_set = set(holdings or [])
     for m in all_subnets:
-        f = apply_pre_filters(m)
+        f = apply_pre_filters(m, is_held=(m.subnet_id in held_set))
         if f == FilterResult.PASS:
             scored.append(score_subnet(m, macro, tao_price_history))
         else:
