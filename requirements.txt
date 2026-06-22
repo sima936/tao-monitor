@@ -3,3 +3,7 @@ python-dotenv
 numpy
 pandas
 yfinance
+
+# Free read-only chain wallet read (chain_fetch.py) — primary holdings source,
+# removes the taostats credit dependency for position reads. Heavy but robust.
+bittensor>=10.4,<11
