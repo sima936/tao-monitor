@@ -1134,8 +1134,18 @@ def run(
     # ── TP/CL stops — evaluate BEFORE allocation so a fired stop forces a
     #    same-cycle full exit, overriding the conviction floor + 18h gate.
     #    Advisory: 🚨 ping + outcome-log row, no auto-unstake. Cron path only. ──
+    if cost_basis and not cb:
+        logger.warning("Stops SKIPPED: cost basis unavailable — not firing P&L/trailing "
+                       "stops blind on stale peaks; holding. Resumes when cost basis returns.")
     force_exit: dict[int, str] = {}
-    if cost_basis:
+    if cost_basis and cb:
+        # Only evaluate stops when cost basis actually loaded. With it absent
+        # (e.g. taostats credits exhausted), P&L is unknown AND the price feed
+        # has a gap, so the persisted peaks are stale — running the trailing
+        # stop then fires on a PHANTOM drop (live price vs stale peak) and
+        # force-exits the whole book, overriding conviction floors. Stops are
+        # advisory and uncalibrated; holding blind is correct, firing blind is
+        # the NIOME trap. Resume automatically once cost basis returns.
         price_by_id  = {s.subnet_id: float(s.token_price) for s in eligible_scored if s.token_price}
         name_by_id   = {s.subnet_id: s.name for s in eligible_scored}
         regime_by_id = {s.subnet_id: s.markov_regime for s in eligible_scored}
