@@ -1345,17 +1345,31 @@ def main():
         # that resurrects exited names (e.g. NIOME) into the report AND into the
         # stop/allocation logic. Treat a failed/empty read like the transient
         # data-fetch path — hold last state, skip the cycle, send a calm note.
+        # PRIMARY: free, read-only chain read (no taostats credits). Returns
+        # None if the SDK is missing or the chain is unreachable -> fall back.
         try:
-            from taostats_fetch import TaostatsClient, TaostatsCreditsExhausted
-            _c = TaostatsClient(api_key=args.api_key, rate_limit_delay=0.5)
-            prefetched_balances = parse_stake_balances(_c.get_wallet_stakes())
-        except TaostatsCreditsExhausted as e:
-            logger.error(f"Taostats API credits exhausted ({e}) — distinct alert, no retry")
-            prefetched_balances = {}
-            credits_exhausted = True
+            from chain_fetch import get_wallet_stakes_via_chain
+            prefetched_balances = get_wallet_stakes_via_chain()
         except Exception as e:
-            logger.warning(f"On-chain holdings fetch failed ({e})")
-            prefetched_balances = {}
+            logger.warning(f"Chain wallet read errored ({e}) — falling back to taostats")
+            prefetched_balances = None
+        if prefetched_balances:
+            logger.info(f"Wallet read via chain RPC: {len(prefetched_balances)} positions (free)")
+        else:
+            # FALLBACK: taostats (costs credits; may be credit-exhausted).
+            try:
+                from taostats_fetch import TaostatsClient, TaostatsCreditsExhausted
+                _c = TaostatsClient(api_key=args.api_key, rate_limit_delay=0.5)
+                prefetched_balances = parse_stake_balances(_c.get_wallet_stakes())
+                if prefetched_balances:
+                    logger.info(f"Wallet read via taostats fallback: {len(prefetched_balances)} positions")
+            except TaostatsCreditsExhausted as e:
+                logger.error(f"Taostats API credits exhausted ({e}) — distinct alert, no retry")
+                prefetched_balances = {}
+                credits_exhausted = True
+            except Exception as e:
+                logger.warning(f"On-chain holdings fetch failed ({e})")
+                prefetched_balances = {}
         if prefetched_balances:
             holdings = sorted(prefetched_balances)
             logger.info(f"Wallet holdings from chain: {holdings} ({len(holdings)} subnets)")
