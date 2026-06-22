@@ -105,6 +105,10 @@ def load_fundamentals() -> dict:
     except Exception:
         return {}
 GINI_CACHE_MAX_AGE_H = float(os.environ.get("GINI_CACHE_MAX_AGE_H", 48))
+# How often to spend the (expensive) live Gini calls. Concentration drifts
+# slowly, so refresh ~daily and reuse the cache in between. < MAX_AGE_H so a
+# reused value is always within the usable cap. Set 0 to force every run.
+GINI_REFRESH_INTERVAL_H = float(os.environ.get("GINI_REFRESH_INTERVAL_H", 24))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,15 +975,31 @@ def run(
     # Fresh values override on top and are written back to keep the cache current.
     # Opt-in, cron only — ~12.5s/subnet.
     if holdings_gini:
-        fresh = fetch_holdings_gini(targets, api_key)   # real values only (0.5 dropped)
-        if fresh:
-            all_metrics = apply_gini_overrides(all_metrics, fresh)
-            save_gini_cache(fresh)
-        reused = [n for n in targets if n != 0 and n not in fresh and n in gini_cache]
-        if reused:
+        # Spend the expensive live Gini calls only when the cache is stale OR a
+        # target is missing from it — otherwise reuse (already applied above).
+        # Cuts the dominant per-cron credit sink from every run to ~once/day.
+        targets_nonroot = [n for n in targets if n != 0]
+        try:
+            cache_age_h = ((time.time() - GINI_CACHE_PATH.stat().st_mtime) / 3600
+                           if GINI_CACHE_PATH.exists() else float("inf"))
+        except Exception:
+            cache_age_h = float("inf")
+        missing = [n for n in targets_nonroot if n not in gini_cache]
+        if cache_age_h >= GINI_REFRESH_INTERVAL_H or missing:
+            fresh = fetch_holdings_gini(targets, api_key)   # real values only (0.5 dropped)
+            if fresh:
+                all_metrics = apply_gini_overrides(all_metrics, fresh)
+                save_gini_cache(fresh)
+            reused = [n for n in targets if n != 0 and n not in fresh and n in gini_cache]
+            if reused:
+                logger.info(
+                    f"Gini: {len(fresh)} fresh, {len(reused)} reused from cache "
+                    f"(≤{GINI_CACHE_MAX_AGE_H:.0f}h old): {reused}"
+                )
+        else:
             logger.info(
-                f"Gini: {len(fresh)} fresh, {len(reused)} reused from cache "
-                f"(≤{GINI_CACHE_MAX_AGE_H:.0f}h old): {reused}"
+                f"Gini: cache fresh ({cache_age_h:.1f}h < {GINI_REFRESH_INTERVAL_H:.0f}h), "
+                f"all {len(targets_nonroot)} targets cached — skipping live fetch (saves credits)"
             )
 
     # Replace synthetic 9-bar history with REAL daily bars for the target set.
@@ -1309,6 +1329,7 @@ def main():
 
     prefetched_balances = None
     wallet_read_failed = False
+    credits_exhausted = False
     if args.holdings:
         holdings = [int(x.strip()) for x in args.holdings.split(",")]
     else:
@@ -1319,9 +1340,13 @@ def main():
         # stop/allocation logic. Treat a failed/empty read like the transient
         # data-fetch path — hold last state, skip the cycle, send a calm note.
         try:
-            from taostats_fetch import TaostatsClient
+            from taostats_fetch import TaostatsClient, TaostatsCreditsExhausted
             _c = TaostatsClient(api_key=args.api_key, rate_limit_delay=0.5)
             prefetched_balances = parse_stake_balances(_c.get_wallet_stakes())
+        except TaostatsCreditsExhausted as e:
+            logger.error(f"Taostats API credits exhausted ({e}) — distinct alert, no retry")
+            prefetched_balances = {}
+            credits_exhausted = True
         except Exception as e:
             logger.warning(f"On-chain holdings fetch failed ({e})")
             prefetched_balances = {}
@@ -1338,12 +1363,21 @@ def main():
             "(no phantom-book compute on stale CURRENT_HOLDINGS)."
         )
         if args.telegram_token and args.telegram_chat:
-            send_telegram(
-                "\U0001f7e1 TAO MONITOR — wallet read unavailable\n\n"
-                "Couldn't read your on-chain positions this cycle (taostats blip). "
-                "Holding last state — no scoring, no stops, no changes. Will retry next run.",
-                args.telegram_token, args.telegram_chat,
-            )
+            if credits_exhausted:
+                send_telegram(
+                    "\U0001f7e0 TAO MONITOR — taostats credits exhausted\n\n"
+                    "API quota is at zero, so I can't read your positions. Holding "
+                    "last state — no scoring, no stops, no changes. Top up at "
+                    "dash.taostats.io/billing and it resumes on the next run.",
+                    args.telegram_token, args.telegram_chat,
+                )
+            else:
+                send_telegram(
+                    "\U0001f7e1 TAO MONITOR — wallet read unavailable\n\n"
+                    "Couldn't read your on-chain positions this cycle (taostats blip). "
+                    "Holding last state — no scoring, no stops, no changes. Will retry next run.",
+                    args.telegram_token, args.telegram_chat,
+                )
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(0)
