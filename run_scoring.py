@@ -93,6 +93,17 @@ SCORE_LOG_PATH = Path(os.environ.get("SCORE_LOG_PATH", str(Path(__file__).parent
 # the genie pre-filter). Point GINI_CACHE_PATH at the same Volume as
 # SCORE_LOG_PATH so it survives ephemeral cron containers.
 GINI_CACHE_PATH = Path(os.environ.get("GINI_CACHE_PATH", str(Path(__file__).parent / "gini_cache.json")))
+FUNDAMENTALS_PATH = Path(os.environ.get("FUNDAMENTALS_PATH", str(Path(__file__).parent / "fundamentals.json")))
+
+
+def load_fundamentals() -> dict:
+    """Qualitative conviction reads (verdict per netuid) for the digest tag.
+    Non-fatal: a missing/broken file just means no fundamental flags this run."""
+    try:
+        with open(FUNDAMENTALS_PATH) as _f:
+            return (json.load(_f) or {}).get("subnets", {}) or {}
+    except Exception:
+        return {}
 GINI_CACHE_MAX_AGE_H = float(os.environ.get("GINI_CACHE_MAX_AGE_H", 48))
 
 
@@ -1192,6 +1203,7 @@ def run(
         # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
         msg = format_actionable_digest(
             plan, free_tao=free_tao, account_tao=account_total_tao, ts=result.timestamp[11:16],
+            fundamentals=load_fundamentals(),
         )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
         # fwd_return_* backfilled later — no lookahead. Non-fatal. (KEEP.)
