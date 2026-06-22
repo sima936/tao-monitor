@@ -88,6 +88,49 @@ def stakes_to_tao_dict(stake_infos, prices) -> dict[int, float]:
     return out
 
 
+def _patch_asi_close_bug() -> None:
+    """Neutralise an async-substrate-interface 2.2.0 bug.
+
+    Its SubstrateInterface.close() calls ``self.<lru_cached_method>.cache_clear()``.
+    On Python 3.13+, accessing an lru_cache-decorated *instance* method via ``self``
+    returns a functools.partial, which has no ``cache_clear`` -> AttributeError.
+    close() is reached via an internal reconnect/init path during a read, so this
+    aborts the whole read. We replace close() with one that closes the websocket
+    and clears caches via the CLASS-level wrapper (which always has cache_clear),
+    each call guarded. Idempotent; version- and Python-version-agnostic.
+    """
+    try:
+        from async_substrate_interface.sync_substrate import SubstrateInterface
+    except Exception as e:
+        _diag(f"asi close-patch skipped (import failed: {e})")
+        return
+    if getattr(SubstrateInterface, "_tao_safe_close", False):
+        return
+    _cached = (
+        "get_runtime_for_version", "get_parent_block_hash", "get_block_runtime_info",
+        "get_block_runtime_version_for", "supports_rpc_method", "_get_block_hash",
+        "_cached_get_block_number",
+    )
+
+    def _safe_close_method(self):
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+        for _name in _cached:
+            try:
+                _attr = getattr(type(self), _name, None)  # class wrapper has cache_clear
+                _cc = getattr(_attr, "cache_clear", None)
+                if callable(_cc):
+                    _cc()
+            except Exception:
+                pass
+
+    SubstrateInterface.close = _safe_close_method
+    SubstrateInterface._tao_safe_close = True
+    _diag("asi close-patch installed (guards cache_clear AttributeError)")
+
+
 def get_wallet_stakes_via_chain(
     coldkey: str = DEFAULT_COLDKEY,
     network: str = DEFAULT_NETWORK,
@@ -101,6 +144,8 @@ def get_wallet_stakes_via_chain(
         _diag(f"SDK UNAVAILABLE ({e}) -> falling back to taostats")
         return None
 
+    _patch_asi_close_bug()  # must run before any Subtensor/SubstrateInterface use
+
     # Read OUTSIDE a context manager so a close-time cleanup bug can't discard
     # the result. We close explicitly via _safe_close after the data is in hand.
     sub = None
@@ -112,6 +157,7 @@ def get_wallet_stakes_via_chain(
     except Exception as e:
         logger.warning(f"chain_fetch: chain read failed ({e}) — caller falls back to taostats")
         _diag(f"CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back to taostats")
+        import traceback as _tb; _diag("TRACE: " + " | ".join(_tb.format_exc().strip().splitlines()[-3:]))
         _safe_close(sub)
         return None
     # Read succeeded — clean up defensively (cleanup errors must not fail it).
