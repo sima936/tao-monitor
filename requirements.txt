@@ -7,3 +7,8 @@ yfinance
 # Free read-only chain wallet read (chain_fetch.py) — primary holdings source,
 # removes the taostats credit dependency for position reads. Heavy but robust.
 bittensor>=10.4,<11
+# Pin websockets below the 16.0 rewrite. async-substrate-interface 2.2.0 (pulled
+# by bittensor) declares websockets>=14.1 with NO upper bound, so pip grabs 16.0,
+# whose asyncio rewrite breaks it at runtime:
+#   AttributeError: 'functools.partial' object has no attribute 'cache_clear'
+websockets>=14.1,<16
