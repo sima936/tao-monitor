@@ -646,7 +646,8 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
 # Forward-compatible `pending_entry` slot lights up when the entry-gate build
 # lands; until then it renders nothing.
 # ─────────────────────────────────────────────────────────────────────────────
-def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> str:
+def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None,
+                             fundamentals=None) -> str:
     DOT = {"Bull": "🟢", "Bear": "🔴", "Sideways": "⚪"}
 
     from subnet_scoring_engine import macro_stance  # canonical stance (single source)
@@ -706,6 +707,24 @@ def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None) -> 
 
     L.extend(rungs if rungs else ["(no actions — book at target)"])
     L.append("")
+    # Fundamental caution line — surface ONLY held names whose stored verdict is
+    # WATCH or AVOID (signal-only; KEEP/ACCUMULATE stay silent so the digest stays
+    # quiet when there's nothing to flag). Full reads live on the dashboard.
+    # `fundamentals` is {netuid: record|verdict} loaded from fundamentals.json.
+    if fundamentals:
+        BADGE = {"AVOID": "⛔AVOID", "WATCH": "👀WATCH"}
+        cautions, seen = [], set()
+        for p in plan.positions:
+            sid = int(p.subnet_id)
+            if sid in seen:
+                continue
+            rec = fundamentals.get(sid) or fundamentals.get(str(sid))
+            v = (rec.get("verdict") if isinstance(rec, dict) else rec) if rec else None
+            if v in BADGE:
+                cautions.append(f"SN{sid} {p.name} {BADGE[v]}")
+                seen.add(sid)
+        if cautions:
+            L.append("⚠️ Fund: " + " · ".join(cautions))
     if free_tao is not None and free_tao > 0.005:
         if plan.deployed_fraction >= 0.999:
             L.append(f"🟢 Rotate free {free_tao:.2f}τ → greens (dial full risk-on)")
