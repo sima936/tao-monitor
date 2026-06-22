@@ -57,6 +57,12 @@ except ImportError:
 
 logger = logging.getLogger("taostats_fetch")
 
+class TaostatsCreditsExhausted(RuntimeError):
+    """Raised on a 429 whose body is "Insufficient credits" (quota at zero).
+
+    Distinct from a transient rate-limit blip: a retry will NEVER recover it,
+    so callers should alert specifically and hold, not loop on backoff."""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # API Client
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +166,19 @@ class TaostatsClient:
 
             # --- HTTP layer: 429 + 5xx are transient, everything else is final ---
             status = resp.status_code
+
+            # Quota exhaustion arrives as a 429 but is NOT transient — retrying
+            # only burns the /status budget and still fails. Detect it and raise
+            # a distinct error so the caller can alert specifically.
+            if status == 429:
+                try:
+                    _msg = str(resp.json().get("message", ""))
+                except Exception:
+                    _msg = resp.text or ""
+                if "insufficient credits" in _msg.lower() or "remaining: 0" in _msg.lower():
+                    logger.error(f"Taostats credits exhausted for {url}: {_msg}")
+                    raise TaostatsCreditsExhausted(_msg or "Insufficient taostats credits")
+
             if status == 429 or 500 <= status < 600:
                 last_exc = requests.exceptions.HTTPError(f"HTTP {status} for {url}")
                 if attempt <= self.max_retries:
