@@ -1294,7 +1294,13 @@ def main():
     parser.add_argument("--telegram-token", default=os.environ.get("TELEGRAM_BOT_TOKEN"))
     parser.add_argument("--telegram-chat", default=os.environ.get("TELEGRAM_CHAT_ID"))
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--no-concentration", action="store_true")
+    parser.add_argument("--no-concentration", action="store_true",
+                        help="(legacy) kept so existing crons keep parsing; "
+                             "concentration is OFF by default now")
+    parser.add_argument("--concentration", action="store_true",
+                        help="Force-ENABLE the concentration/Gini metagraph fetch. "
+                             "OFF by default — it is the dominant taostats credit "
+                             "sink and the genie metric is unreliable.")
     parser.add_argument("--top-n", type=int, default=TOP_N)
     parser.add_argument("--holdings", type=str, default=None)
     parser.add_argument("--force-send", action="store_true",
@@ -1388,7 +1394,7 @@ def main():
             telegram_token=args.telegram_token,
             telegram_chat=args.telegram_chat,
             output_json=args.json,
-            fetch_concentration=not args.no_concentration,
+            fetch_concentration=args.concentration and not args.no_concentration,
             holdings=holdings,
             top_n=args.top_n,
             force_send=args.force_send,
