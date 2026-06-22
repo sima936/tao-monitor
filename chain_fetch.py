@@ -171,6 +171,73 @@ def get_wallet_stakes_via_chain(
     return balances
 
 
+
+def _dynamicinfos_to_metrics(subnets):
+    """list[DynamicInfo] -> list[SubnetMetrics] (the engine's type).
+
+    Maps chain fields to the same shape taostats fetch_all_subnet_metrics returns:
+      price -> token_price, tao_in -> pool_depth, subnet_volume -> volume_24h,
+      genie_score = 0.5 (concentration is off), plus a synthetic price history
+      (per-subnet history was already synthetic on the taostats path). A crude
+      trend slope is derived from moving_price (a real chain EMA) when present,
+      else flat.
+    """
+    from taostats_fetch import SubnetMetrics, _synthetic_history
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    out = []
+    for di in subnets or []:
+        nid = int(di.netuid)
+        price = _as_float(getattr(di, "price", 0.0))
+        depth = _as_float(getattr(di, "tao_in", 0.0))
+        vol = _as_float(getattr(di, "subnet_volume", 0.0))
+        mv = _as_float(getattr(di, "moving_price", 0.0))
+        pct_1w = ((price / mv - 1.0) * 100.0) if (mv and mv > 0) else 0.0
+        pct_1d = pct_1w / 7.0
+        hist = _synthetic_history(price, pct_1d, pct_1w)
+        ts = [(now - _dt.timedelta(days=(len(hist) - 1 - i))).isoformat()
+              for i in range(len(hist))]
+        name = getattr(di, "subnet_name", None)
+        if isinstance(name, (bytes, bytearray)):
+            name = bytes(name).decode("utf-8", "ignore")
+        name = (str(name).strip() if name else "") or f"SN{nid}"
+        out.append(SubnetMetrics(
+            subnet_id=nid, name=name, token_price=price, pool_depth=depth,
+            genie_score=0.5, price_history=hist, timestamps=ts,
+            volume_24h=vol, volume_7d=0.0,
+        ))
+    return out
+
+
+def fetch_all_subnet_metrics_via_chain(network: str = DEFAULT_NETWORK):
+    """Free subnet metrics (price, pool depth, volume) from ONE all_subnets()
+    chain call — same SubnetMetrics list shape as taostats fetch_all_subnet_metrics.
+    Returns None on any failure (or empty) so the caller falls back to taostats."""
+    try:
+        import bittensor as bt
+    except Exception as e:
+        _diag(f"metrics: SDK unavailable ({e}) -> falling back")
+        return None
+    _patch_asi_close_bug()
+    sub = None
+    try:
+        sub = bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS)
+        subnets = sub.all_subnets()
+        metrics = _dynamicinfos_to_metrics(subnets)
+    except Exception as e:
+        _diag(f"metrics: CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back")
+        import traceback as _tb
+        _diag("TRACE: " + " | ".join(_tb.format_exc().strip().splitlines()[-3:]))
+        _safe_close(sub)
+        return None
+    _safe_close(sub)
+    if not metrics:
+        _diag("metrics: chain returned 0 subnets -> falling back")
+        return None
+    _diag(f"metrics OK — {len(metrics)} subnets via chain RPC (free)")
+    return metrics
+
+
 if __name__ == "__main__":
     import json, traceback
     _diag("=== SELF-TEST START ===")
