@@ -35,6 +35,22 @@ def _diag(msg: str) -> None:
     """Print to stderr so bittensor's logging takeover can't mute it."""
     print(f"[chain_fetch] {msg}", file=_sys.stderr, flush=True)
 
+
+def _safe_close(sub) -> None:
+    """Close the Subtensor connection, swallowing cleanup-only errors.
+
+    async-substrate-interface 2.2.0's SubstrateInterface.close() calls
+    .cache_clear() on instance methods, one of which is a functools.partial
+    in this build -> AttributeError. That happens AFTER the data is read, so
+    a close-time error must never discard a successful result.
+    """
+    if sub is None:
+        return
+    try:
+        sub.close()
+    except Exception as e:  # cleanup only — read already completed
+        _diag(f"close() cleanup error ignored ({type(e).__name__}: {e})")
+
 # Simon's coldkey (public address — same default as taostats_fetch.DEFAULT_COLDKEY).
 DEFAULT_COLDKEY = "5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR"
 DEFAULT_NETWORK = "finney"
@@ -85,22 +101,28 @@ def get_wallet_stakes_via_chain(
         _diag(f"SDK UNAVAILABLE ({e}) -> falling back to taostats")
         return None
 
+    # Read OUTSIDE a context manager so a close-time cleanup bug can't discard
+    # the result. We close explicitly via _safe_close after the data is in hand.
+    sub = None
     try:
-        with bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS) as sub:
-            stake_infos = sub.get_stake_info_for_coldkey(coldkey)
-            prices = sub.get_subnet_prices()
-            balances = stakes_to_tao_dict(stake_infos, prices)
-        logger.info(
-            f"chain_fetch: read {len(balances)} positions for "
-            f"{coldkey[:6]}…{coldkey[-4:]} via chain RPC (free, read-only)"
-        )
-        _diag(f"OK — {len(balances)} positions via chain RPC (free): "
-              f"{sorted(balances)} | total {sum(balances.values()):.3f}\u03c4")
-        return balances
+        sub = bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS)
+        stake_infos = sub.get_stake_info_for_coldkey(coldkey)
+        prices = sub.get_subnet_prices()
+        balances = stakes_to_tao_dict(stake_infos, prices)
     except Exception as e:
         logger.warning(f"chain_fetch: chain read failed ({e}) — caller falls back to taostats")
         _diag(f"CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back to taostats")
+        _safe_close(sub)
         return None
+    # Read succeeded — clean up defensively (cleanup errors must not fail it).
+    _safe_close(sub)
+    logger.info(
+        f"chain_fetch: read {len(balances)} positions for "
+        f"{coldkey[:6]}…{coldkey[-4:]} via chain RPC (free, read-only)"
+    )
+    _diag(f"OK — {len(balances)} positions via chain RPC (free): "
+          f"{sorted(balances)} | total {sum(balances.values()):.3f}\u03c4")
+    return balances
 
 
 if __name__ == "__main__":
