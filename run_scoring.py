@@ -1061,7 +1061,7 @@ def run(
     macro_state = macro_dict_to_state(macro)
 
     # Score — pass pre-computed macro so scoring engine doesn't recompute with empty data
-    result = run_scoring_cycle(all_metrics, top_n=top_n, macro=macro_state)
+    result = run_scoring_cycle(all_metrics, top_n=top_n, macro=macro_state, holdings=holdings)
 
     # Auto cost-basis (opt-in, cron only — pages stake-event history, ~12.5s/page).
     # Computed here on the always-slow cron and pushed to the dashboard, because
