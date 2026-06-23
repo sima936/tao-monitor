@@ -172,6 +172,31 @@ def get_wallet_stakes_via_chain(
 
 
 
+def get_free_balance_via_chain(
+    coldkey: str = DEFAULT_COLDKEY,
+    network: str = DEFAULT_NETWORK,
+):
+    """Free (unstaked) TAO balance for the coldkey, read off-chain. Returns a
+    float, or None on any failure so the caller falls back to taostats."""
+    try:
+        import bittensor as bt
+    except Exception as e:
+        _diag(f"free-balance: SDK unavailable ({e}) -> falling back")
+        return None
+    _patch_asi_close_bug()
+    sub = None
+    try:
+        sub = bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS)
+        free = _as_float(sub.get_balance(coldkey))
+    except Exception as e:
+        _diag(f"free-balance: CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back")
+        _safe_close(sub)
+        return None
+    _safe_close(sub)
+    _diag(f"free-balance OK — {free:.3f}\u03c4 via chain RPC (free)")
+    return free
+
+
 def _dynamicinfos_to_metrics(subnets):
     """list[DynamicInfo] -> list[SubnetMetrics] (the engine's type).
 
