@@ -1294,10 +1294,12 @@ def run(
             # credit-wall keeps store deltas only (no blank, no fabrication).
             fng_index = None
             fng_sentiment = ""
+            print(f"[probe] api_key present={bool(api_key)}", file=sys.stderr, flush=True)
             if api_key:
                 try:
                     from taostats_fetch import fetch_pool_overlay, TaostatsCreditsExhausted
                     ov = fetch_pool_overlay(client)
+                    print(f"[probe] overlay returned: deltas={len(ov.get('deltas') or {})} fng={ov.get('fear_and_greed')}", file=sys.stderr, flush=True)
                     for _nid, _od in (ov.get("deltas") or {}).items():
                         _merged = dict(deltas.get(_nid) or {})
                         _merged.update(_od)          # taostats wins overlapping horizons
@@ -1306,14 +1308,13 @@ def run(
                     if _fng:
                         fng_index = _fng.get("index")
                         fng_sentiment = _fng.get("sentiment", "")
-                    logger.warning(
-                        f"[probe] taostats overlay: momentum on {len(ov.get('deltas') or {})} subnets, "
-                        f"F&G={'present' if fng_index is not None else 'absent'}"
-                    )
+                    print(f"[probe] overlay parsed: fng_index={fng_index}", file=sys.stderr, flush=True)
                 except TaostatsCreditsExhausted as ce:
-                    logger.warning(f"taostats overlay credit-walled ({ce}) — store-only this cycle")
+                    print(f"[probe] overlay CREDIT-WALLED: {ce}", file=sys.stderr, flush=True)
                 except Exception as oe:
-                    logger.warning(f"taostats overlay failed ({oe}) — store-only this cycle")
+                    import traceback
+                    print(f"[probe] overlay FAILED: {type(oe).__name__}: {oe}", file=sys.stderr, flush=True)
+                    traceback.print_exc()
 
             # our horizon key -> the field name gordie.html parses
             _DKEY = {"1h": "price_change_1_hour", "24h": "price_change_1_day",
@@ -1342,13 +1343,13 @@ def run(
                 _pool_rows.append(row)
             _have = sum(1 for r in _pool_rows if "price_change_1_day" in r)
             _src = "taostats+store" if fng_index is not None else "store-only"
-            logger.warning(
-                f"[probe] Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets "
-                f"({_src}); F&G={fng_index if fng_index is not None else '—'}"
-            )
+            print(f"[probe] Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets ({_src}); F&G={fng_index if fng_index is not None else chr(8212)}", file=sys.stderr, flush=True)
             push_snapshot_to_dashboard("pools", json.dumps({"data": _pool_rows}))
+            print("[probe] pools snapshot PUSHED ok", file=sys.stderr, flush=True)
     except Exception as e:
-        logger.warning(f"Pools snapshot push failed (non-fatal): {e}")
+        import traceback
+        print(f"[probe] pools push EXCEPTION: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc()
 
     elapsed = time.time() - start_time
     logger.info(
