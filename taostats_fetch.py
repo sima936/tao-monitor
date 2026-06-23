@@ -807,6 +807,101 @@ def fetch_extended_history(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Momentum + sentiment overlay (LS31)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _opt_float(val) -> Optional[float]:
+    """Parse a value to float, returning None when the field is genuinely
+    absent/null/unparseable — but KEEPING a real 0.0.
+
+    Unlike _safe_float (which defaults missing → 0.0), this preserves the
+    omit-vs-zero distinction the dashboard relies on: a missing horizon must
+    surface as "—" (honest "no data"), not a fabricated 0.0% that would trip
+    the ALL_ZERO / FLAT gates. A literal "0.00" from the API is a real datum
+    and is kept.
+    """
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def fetch_pool_overlay(client: TaostatsClient) -> dict:
+    """ONE bulk pool/latest call → instant per-subnet momentum + network F&G.
+
+    Returns:
+        {
+            "deltas": {netuid: {"1h": pct, "24h": pct, "7d": pct}},  # only real horizons
+            "fear_and_greed": {"index": float, "sentiment": str} | None,
+        }
+
+    Design (mirrors snapshot_history.py / chain_fetch.py philosophy):
+      - Missing horizons are OMITTED, never zeroed. A real "0.00" IS kept
+        (see _opt_float). The caller attaches only present keys so the
+        dashboard shows "—" for unknowns, not a fake flat 0.0%.
+      - Credit exhaustion propagates as TaostatsCreditsExhausted from
+        client.get()'s existing guard — the caller catches it and falls back
+        to the snapshot store (store-only mode), never blanks the dashboard.
+      - pool/latest still returns price_change_1_hour / _1_day / _1_week and
+        fear_and_greed_index; it only dropped the seven_day_prices array. This
+        function reads exactly those surviving fields — no extra API cost.
+
+    Horizon mapping (API field → dashboard key):
+        price_change_1_hour  → "1h"
+        price_change_1_day   → "24h"
+        price_change_1_week  → "7d"
+    (30d is NOT a taostats field — it comes from the snapshot store. The caller
+    merges: taostats wins 1h/24h/7d, store supplies 30d.)
+
+    Cost: exactly ONE call per invocation (~120/month at the 6h cron cadence),
+    well under the 5/min free limit. This is FEWER taostats calls than the old
+    dashboard, which made this same call on every browser page load.
+    """
+    pools = client.get_all_pools()  # may raise TaostatsCreditsExhausted — let it
+    logger.info(f"Overlay: parsing momentum + F&G from {len(pools)} pools")
+
+    deltas: dict[int, dict[str, float]] = {}
+    fng: Optional[dict] = None
+
+    _field_map = (
+        ("1h", "price_change_1_hour"),
+        ("24h", "price_change_1_day"),
+        ("7d", "price_change_1_week"),
+    )
+
+    for pool in pools:
+        try:
+            netuid = int(pool.get("netuid"))
+        except (TypeError, ValueError):
+            continue
+
+        d: dict[str, float] = {}
+        for key, api_field in _field_map:
+            v = _opt_float(pool.get(api_field))
+            if v is not None:          # omit unknowns, keep a real 0.0
+                d[key] = v
+        if d:
+            deltas[netuid] = d
+
+        # Fear & Greed is network-wide; capture the first pool that carries it.
+        if fng is None:
+            idx = _opt_float(pool.get("fear_and_greed_index"))
+            if idx is not None:
+                fng = {
+                    "index": idx,
+                    "sentiment": pool.get("fear_and_greed_sentiment", ""),
+                }
+
+    logger.info(
+        f"Overlay: {len(deltas)} subnets with momentum; "
+        f"F&G={'present' if fng else 'absent'}"
+    )
+    return {"deltas": deltas, "fear_and_greed": fng}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Quick test / CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -822,11 +917,32 @@ if __name__ == "__main__":
     parser.add_argument("--concentration", action="store_true",
                         help="Also fetch metagraph for Gini calculation")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    parser.add_argument("--overlay", action="store_true",
+                        help="Test the momentum + Fear&Greed overlay (1 bulk call)")
     args = parser.parse_args()
 
     client = TaostatsClient(api_key=args.api_key)
 
-    if args.netuid:
+    if args.overlay:
+        print("\nFetching pool overlay (momentum + Fear & Greed)...")
+        ov = fetch_pool_overlay(client)
+        if args.json:
+            print(json.dumps(ov, indent=2))
+        else:
+            deltas = ov["deltas"]
+            fng = ov["fear_and_greed"]
+            print(f"  Momentum on {len(deltas)} subnets")
+            for nid in sorted(deltas)[:10]:
+                d = deltas[nid]
+                cols = "  ".join(f"{k}={d[k]:+.2f}%" for k in ("1h", "24h", "7d") if k in d)
+                print(f"    SN{nid:>3d}  {cols}")
+            if len(deltas) > 10:
+                print(f"    ... and {len(deltas) - 10} more")
+            if fng:
+                print(f"  Fear & Greed: {fng['index']:.0f} / {fng['sentiment']}")
+            else:
+                print("  Fear & Greed: — (not returned)")
+    elif args.netuid:
         print(f"\nFetching SN{args.netuid}...")
         pool = client.get_pool(args.netuid)
         if pool:
