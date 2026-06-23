@@ -316,6 +316,26 @@ def push_cost_basis_to_dashboard(cost_basis_json: str) -> None:
         logger.warning(f"Cost-basis ingest failed: {e}")
 
 
+def push_snapshot_to_dashboard(suffix: str, body_json: str) -> None:
+    """POST a chain-derived snapshot (stakes / pools) to serve.py's cache so
+    the dashboard renders FREE chain data instead of live taostats. Endpoint
+    derived from DASHBOARD_INGEST_URL by swapping ingest-score -> ingest-<suffix>."""
+    score_url = os.environ.get('DASHBOARD_INGEST_URL', '').strip()
+    token = os.environ.get('SCORE_INGEST_TOKEN', '').strip()
+    if not score_url or not token:
+        return
+    url = score_url.replace('ingest-score', f'ingest-{suffix}')
+    try:
+        resp = requests.post(
+            url, data=body_json.encode('utf-8'),
+            headers={'X-Ingest-Token': token, 'Content-Type': 'application/json'},
+            timeout=15,
+        )
+        logger.info(f"Dashboard {suffix} ingest: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Dashboard {suffix} ingest failed: {e}")
+
+
 def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
     """netuid → balance in TAO from get_wallet_stakes() entries.
 
@@ -1226,6 +1246,31 @@ def run(
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
         payload_json = to_json(result)
     push_score_to_dashboard(payload_json)
+
+    # Free chain snapshots for the dashboard (Portfolio + pool tiles), so it
+    # stops live-fetching credit-walled taostats. Shapes match the taostats
+    # responses gordie.html parses; balances/depth in rao (gordie auto-scales).
+    try:
+        if prefetched_balances:
+            _stk = {"data": [{"netuid": int(nid),
+                              "balance_as_tao": str(int(round(t * 1e9)))}
+                             for nid, t in prefetched_balances.items()]}
+            push_snapshot_to_dashboard("stakes", json.dumps(_stk))
+    except Exception as e:
+        logger.warning(f"Stakes snapshot push failed (non-fatal): {e}")
+    try:
+        if all_metrics:
+            _pools = {"data": [{
+                "netuid": int(m.subnet_id), "name": m.name,
+                "price": float(m.token_price),
+                "total_tao": int(round(float(m.pool_depth) * 1e9)),
+                "tao_volume_24_hr": int(round(float(getattr(m, "volume_24h", 0.0)) * 1e9)),
+                "price_change_1_hour": 0.0, "price_change_1_day": 0.0,
+                "price_change_1_week": 0.0, "price_change_1_month": 0.0,
+            } for m in all_metrics]}
+            push_snapshot_to_dashboard("pools", json.dumps(_pools))
+    except Exception as e:
+        logger.warning(f"Pools snapshot push failed (non-fatal): {e}")
 
     elapsed = time.time() - start_time
     logger.info(
