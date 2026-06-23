@@ -1306,8 +1306,8 @@ def run(
                     if _fng:
                         fng_index = _fng.get("index")
                         fng_sentiment = _fng.get("sentiment", "")
-                    logger.info(
-                        f"taostats overlay: momentum on {len(ov.get('deltas') or {})} subnets, "
+                    logger.warning(
+                        f"[probe] taostats overlay: momentum on {len(ov.get('deltas') or {})} subnets, "
                         f"F&G={'present' if fng_index is not None else 'absent'}"
                     )
                 except TaostatsCreditsExhausted as ce:
@@ -1342,8 +1342,8 @@ def run(
                 _pool_rows.append(row)
             _have = sum(1 for r in _pool_rows if "price_change_1_day" in r)
             _src = "taostats+store" if fng_index is not None else "store-only"
-            logger.info(
-                f"Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets "
+            logger.warning(
+                f"[probe] Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets "
                 f"({_src}); F&G={fng_index if fng_index is not None else '—'}"
             )
             push_snapshot_to_dashboard("pools", json.dumps({"data": _pool_rows}))
