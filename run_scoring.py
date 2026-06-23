@@ -1113,7 +1113,19 @@ def run(
     # basis) → free None → base = staked, behaviour unchanged. Soft-fail → None.
     free_tao = None
     balance_total_tao = None
-    if cost_basis and bal_by_netuid:
+    # PRIMARY: free (unstaked) balance from chain — no taostats credits, and
+    # consistent with the chain staked read (same snapshot, no park-lag double
+    # count). Falls back to the taostats residual path if the chain read fails.
+    try:
+        from chain_fetch import get_free_balance_via_chain
+        free_tao = get_free_balance_via_chain()
+    except Exception as e:
+        logger.warning(f"Chain free-balance read failed ({e}) — falling back")
+        free_tao = None
+    if free_tao is not None:
+        balance_total_tao = (account_tao or 0.0) + free_tao
+        logger.info(f"Free balance via chain: {free_tao:.3f}\u03c4 (free)")
+    elif cost_basis and bal_by_netuid:
         acct = client.get_account_balances()
         if acct and acct.get("total") is not None:
             balance_total_tao = acct["total"]
