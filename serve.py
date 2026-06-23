@@ -26,6 +26,11 @@ LATEST_COST_BASIS = None
 # instead of a 502 — a rate-limit never reaches the browser after first success.
 LATEST_PRICE_BODY = None
 
+# Chain-derived snapshots pushed by the cron (free), so the dashboard's
+# Portfolio + pool tiles don't live-fetch credit-walled taostats.
+LATEST_STAKES_BODY = None
+LATEST_POOLS_BODY = None
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class AuthHandler(http.server.SimpleHTTPRequestHandler):
@@ -63,7 +68,8 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.rstrip('/')
-        if path not in ('/api/ingest-score', '/api/ingest-cost-basis'):
+        if path not in ('/api/ingest-score', '/api/ingest-cost-basis',
+                        '/api/ingest-stakes', '/api/ingest-pools'):
             self.send_response(404)
             self.end_headers()
             return
@@ -76,11 +82,14 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         try:
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length)
+            global LATEST_COST_BASIS, LATEST_SCORE, LATEST_STAKES_BODY, LATEST_POOLS_BODY
             if path == '/api/ingest-cost-basis':
-                global LATEST_COST_BASIS
                 LATEST_COST_BASIS = body.decode('utf-8')
+            elif path == '/api/ingest-stakes':
+                LATEST_STAKES_BODY = body
+            elif path == '/api/ingest-pools':
+                LATEST_POOLS_BODY = body
             else:
-                global LATEST_SCORE
                 LATEST_SCORE = body.decode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -154,6 +163,14 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
     def proxy_portfolio_stakes(self):
+        if LATEST_STAKES_BODY:  # free chain snapshot from the cron
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('X-Source', 'chain-cache')
+            self.end_headers()
+            self.wfile.write(LATEST_STAKES_BODY)
+            return
         try:
             coldkey = '5HR3cMSEnyzQbGCqgeHHQxCosgCBDi6a2tkWiBE3XCwUsmNR'
             url = f'https://api.taostats.io/api/dtao/stake_balance/latest/v1?coldkey={coldkey}&limit=100'
@@ -220,6 +237,14 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({'error': str(e)}).encode())
 
     def proxy_gordie_pools(self):
+        if LATEST_POOLS_BODY:  # free chain snapshot from the cron
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('X-Source', 'chain-cache')
+            self.end_headers()
+            self.wfile.write(LATEST_POOLS_BODY)
+            return
         try:
             url = 'https://api.taostats.io/api/dtao/pool/latest/v1?limit=256'
             req = urllib.request.Request(url, headers={
