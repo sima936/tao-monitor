@@ -1272,17 +1272,49 @@ def run(
         logger.warning(f"Stakes snapshot push failed (non-fatal): {e}")
     try:
         if all_metrics:
-            # Self-accumulated per-subnet history: append this instant, then read
-            # back REAL deltas (24h/7d/30d come alive as the store fills; 1h needs
-            # a sub-hourly logger — see snapshot_history --record). Fails closed:
-            # on any error deltas == {} and we emit no change fields (dashboard
-            # shows "—"), never the old fabricated 0.0 that tripped ALL_ZERO.
-            deltas = {}
+            # Per-subnet momentum for the dashboard, merged from two sources:
+            #   (1) taostats overlay (fetch_pool_overlay) — INSTANT 1h/24h/7d +
+            #       network Fear&Greed, server-computed, NO accumulation wait.
+            #       ONE bulk call; primary on the horizons it covers.
+            #   (2) snapshot store (record_and_deltas) — supplies 30d (taostats
+            #       doesn't return it) and carries everything if taostats is
+            #       credit-walled. Recorded every cycle so the store keeps filling.
+            # Precedence: taostats wins 1h/24h/7d; store keeps 30d. Neither has a
+            # horizon -> field omitted (dashboard "—"), never a fabricated 0.0.
+
+            # (2) store first — always record this instant + read back deltas.
+            deltas: dict[int, dict] = {}
             try:
                 from snapshot_history import record_and_deltas
                 deltas = record_and_deltas(all_metrics)
             except Exception as he:
-                logger.warning(f"snapshot_history unavailable ({he}) — no deltas this cycle")
+                logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
+
+            # (1) taostats overlay — instant, primary. Guarded by api_key;
+            # credit-wall keeps store deltas only (no blank, no fabrication).
+            fng_index = None
+            fng_sentiment = ""
+            if api_key:
+                try:
+                    from taostats_fetch import fetch_pool_overlay, TaostatsCreditsExhausted
+                    ov = fetch_pool_overlay(client)
+                    for _nid, _od in (ov.get("deltas") or {}).items():
+                        _merged = dict(deltas.get(_nid) or {})
+                        _merged.update(_od)          # taostats wins overlapping horizons
+                        deltas[_nid] = _merged
+                    _fng = ov.get("fear_and_greed")
+                    if _fng:
+                        fng_index = _fng.get("index")
+                        fng_sentiment = _fng.get("sentiment", "")
+                    logger.info(
+                        f"taostats overlay: momentum on {len(ov.get('deltas') or {})} subnets, "
+                        f"F&G={'present' if fng_index is not None else 'absent'}"
+                    )
+                except TaostatsCreditsExhausted as ce:
+                    logger.warning(f"taostats overlay credit-walled ({ce}) — store-only this cycle")
+                except Exception as oe:
+                    logger.warning(f"taostats overlay failed ({oe}) — store-only this cycle")
+
             # our horizon key -> the field name gordie.html parses
             _DKEY = {"1h": "price_change_1_hour", "24h": "price_change_1_day",
                      "7d": "price_change_1_week", "30d": "price_change_1_month"}
@@ -1295,15 +1327,25 @@ def run(
                     "total_tao": int(round(float(m.pool_depth) * 1e9)),
                     "tao_volume_24_hr": int(round(float(getattr(m, "volume_24h", 0.0)) * 1e9)),
                 }
-                # Only attach a change field when we have real history for it.
+                # Attach a change field only when we have real data for it.
                 # Omitting (not 0.0) keeps unknown horizons honest: sf()->null->"—"
                 # and the ALL_ZERO/FLAT gates stay dormant until data exists.
                 for hk, pct in (deltas.get(nid) or {}).items():
                     if hk in _DKEY:
                         row[_DKEY[hk]] = round(float(pct), 4)
+                # Network-wide Fear&Greed rides on every row; gordie.html averages
+                # the non-null values, so a constant across rows == that value.
+                if fng_index is not None:
+                    row["fear_and_greed_index"] = fng_index
+                    if fng_sentiment:
+                        row["fear_and_greed_sentiment"] = fng_sentiment
                 _pool_rows.append(row)
             _have = sum(1 for r in _pool_rows if "price_change_1_day" in r)
-            logger.info(f"Pools snapshot: real 24h deltas on {_have}/{len(_pool_rows)} subnets")
+            _src = "taostats+store" if fng_index is not None else "store-only"
+            logger.info(
+                f"Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets "
+                f"({_src}); F&G={fng_index if fng_index is not None else '—'}"
+            )
             push_snapshot_to_dashboard("pools", json.dumps({"data": _pool_rows}))
     except Exception as e:
         logger.warning(f"Pools snapshot push failed (non-fatal): {e}")
