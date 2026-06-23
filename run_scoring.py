@@ -1272,15 +1272,39 @@ def run(
         logger.warning(f"Stakes snapshot push failed (non-fatal): {e}")
     try:
         if all_metrics:
-            _pools = {"data": [{
-                "netuid": int(m.subnet_id), "name": m.name,
-                "price": float(m.token_price),
-                "total_tao": int(round(float(m.pool_depth) * 1e9)),
-                "tao_volume_24_hr": int(round(float(getattr(m, "volume_24h", 0.0)) * 1e9)),
-                "price_change_1_hour": 0.0, "price_change_1_day": 0.0,
-                "price_change_1_week": 0.0, "price_change_1_month": 0.0,
-            } for m in all_metrics]}
-            push_snapshot_to_dashboard("pools", json.dumps(_pools))
+            # Self-accumulated per-subnet history: append this instant, then read
+            # back REAL deltas (24h/7d/30d come alive as the store fills; 1h needs
+            # a sub-hourly logger — see snapshot_history --record). Fails closed:
+            # on any error deltas == {} and we emit no change fields (dashboard
+            # shows "—"), never the old fabricated 0.0 that tripped ALL_ZERO.
+            deltas = {}
+            try:
+                from snapshot_history import record_and_deltas
+                deltas = record_and_deltas(all_metrics)
+            except Exception as he:
+                logger.warning(f"snapshot_history unavailable ({he}) — no deltas this cycle")
+            # our horizon key -> the field name gordie.html parses
+            _DKEY = {"1h": "price_change_1_hour", "24h": "price_change_1_day",
+                     "7d": "price_change_1_week", "30d": "price_change_1_month"}
+            _pool_rows = []
+            for m in all_metrics:
+                nid = int(m.subnet_id)
+                row = {
+                    "netuid": nid, "name": m.name,
+                    "price": float(m.token_price),
+                    "total_tao": int(round(float(m.pool_depth) * 1e9)),
+                    "tao_volume_24_hr": int(round(float(getattr(m, "volume_24h", 0.0)) * 1e9)),
+                }
+                # Only attach a change field when we have real history for it.
+                # Omitting (not 0.0) keeps unknown horizons honest: sf()->null->"—"
+                # and the ALL_ZERO/FLAT gates stay dormant until data exists.
+                for hk, pct in (deltas.get(nid) or {}).items():
+                    if hk in _DKEY:
+                        row[_DKEY[hk]] = round(float(pct), 4)
+                _pool_rows.append(row)
+            _have = sum(1 for r in _pool_rows if "price_change_1_day" in r)
+            logger.info(f"Pools snapshot: real 24h deltas on {_have}/{len(_pool_rows)} subnets")
+            push_snapshot_to_dashboard("pools", json.dumps({"data": _pool_rows}))
     except Exception as e:
         logger.warning(f"Pools snapshot push failed (non-fatal): {e}")
 
