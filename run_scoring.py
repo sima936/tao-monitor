@@ -1388,6 +1388,20 @@ def run(
         macro_header = format_macro_header(macro)
         msg = format_telegram_alert(result, current_holdings=holdings,
                                     macro_header=macro_header, pnl_by_netuid=pnl_by_netuid)
+
+    # Store-health footer (tiny): watch the snapshot store fill from Telegram
+    # without a console on the cron. Guarded — never blocks or breaks the digest.
+    try:
+        from snapshot_history import stats as _snap_stats
+        _s = _snap_stats()
+        if "error" not in _s:
+            msg += (f"\n\n\U0001F4CA store: {_s['rows']} rows \u00b7 "
+                    f"{_s['netuids']} subnets \u00b7 {_s['span_days']}d span")
+        else:
+            msg += f"\n\n\U0001F4CA store: error ({_s['error']})"
+    except Exception as _se:
+        print(f"[probe] store footer skipped: {_se}", file=sys.stderr, flush=True)
+
     print(msg)
 
     # Change detection — decide whether to send
