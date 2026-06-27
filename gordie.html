@@ -419,11 +419,6 @@ footer {
       <div class="card-sub" id="alert-sub">—</div>
     </div>
     <div class="card">
-      <div class="card-label">Fear & Greed</div>
-      <div class="card-value" id="fear-greed">—</div>
-      <div class="card-sub" id="fear-greed-label">—</div>
-    </div>
-    <div class="card">
       <div class="card-label">Last Scan</div>
       <div class="card-value" style="font-size:0.9rem;padding-top:0.2rem" id="last-scan">—</div>
       <div class="card-sub" id="scan-time">—</div>
@@ -687,12 +682,11 @@ function applyPrefilters(netuid, pool) {
   let mc = mcRaw && mcRaw > 1e6 ? mcRaw / 1e9 : mcRaw;
   let volRaw = sf(pool.tao_volume_24_hr);
   let vol = volRaw && volRaw > 1e6 ? volRaw / 1e9 : volRaw;
-  const fg = sf(pool.fear_and_greed_index);
   const name = pool.name || 'SN' + netuid;
 
   const metrics = { netuid, name, price, pool_depth: totalTao, pct_hour: pctHour,
     pct_day: pctDay, pct_week: pctWeek, pct_month: pctMonth,
-    market_cap: mc, volume_24h: vol, fear_greed: fg };
+    market_cap: mc, volume_24h: vol };
 
   if (BLACKLIST.has(netuid)) return { passed: false, reason: 'BLACKLISTED', metrics };
   if (netuid === 0) return { passed: false, reason: 'ROOT_SUBNET', metrics };
@@ -1320,7 +1314,6 @@ async function loadData() {
     // Process all subnets
     const pools = poolData.data || [];
     const results = [];
-    let fgSum = 0, fgCount = 0;
 
     pools.forEach(pool => {
       const netuid = parseInt(pool.netuid);
@@ -1328,9 +1321,6 @@ async function loadData() {
       const { passed, reason, metrics } = applyPrefilters(netuid, pool);
       const score = passed ? scoreSubnet(metrics) : null;
       results.push({ passed, reason, metrics, score });
-
-      const fg = sf(pool.fear_and_greed_index);
-      if (fg) { fgSum += fg; fgCount++; }
     });
 
     // Summary cards
@@ -1340,15 +1330,6 @@ async function loadData() {
     document.getElementById('total-passed').textContent = passCount;
     document.getElementById('total-passed').className = 'card-value ' + (passCount > 0 ? 'green' : 'red');
     document.getElementById('pass-rate').textContent = ((passCount / results.length) * 100).toFixed(1) + '% pass rate';
-
-    if (fgCount > 0) {
-      const avgFg = fgSum / fgCount;
-      document.getElementById('fear-greed').textContent = avgFg.toFixed(0);
-      const label = avgFg >= 75 ? 'Extreme Greed' : avgFg >= 55 ? 'Greed' : avgFg >= 45 ? 'Neutral' : avgFg >= 25 ? 'Fear' : 'Extreme Fear';
-      const fgColor = avgFg >= 55 ? 'green' : avgFg >= 45 ? 'gold' : 'red';
-      document.getElementById('fear-greed').className = 'card-value ' + fgColor;
-      document.getElementById('fear-greed-label').textContent = label;
-    }
 
     const now = new Date();
     document.getElementById('last-scan').textContent = now.toLocaleTimeString();
