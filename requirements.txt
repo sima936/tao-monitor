@@ -12,3 +12,6 @@ bittensor>=10.5.0,<11
 # whose asyncio rewrite breaks it at runtime:
 #   AttributeError: 'functools.partial' object has no attribute 'cache_clear'
 websockets>=14.1,<16
+# Olson tz database for zoneinfo (Europe/London digest timestamp). Pure-data
+# wheel, no compile; guarantees the clock resolves on a minimal container.
+tzdata
