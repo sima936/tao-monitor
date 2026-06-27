@@ -57,6 +57,38 @@ DEFAULT_NETWORK = "finney"
 # Official mainnet endpoint first; SDK retries these on transient drops.
 FALLBACK_ENDPOINTS = ["wss://entrypoint-finney.opentensor.ai:443"]
 
+# Reason flag for the most recent chain read, so a caller that only sees the
+# None/{}/{..} return value can still branch on WHY a None came back — without
+# changing that return contract. Set by every chain-read fn; "ok" on success.
+# Single-threaded cron, so plain module state is fine.
+#   "ok"               -> last read succeeded
+#   "storage_mismatch" -> SDK queried a storage key the runtime dropped
+#                         (finney runtime upgrade ahead of the pinned SDK) — bump the pin
+#   "unreachable"      -> websocket/connection/timeout — transient chain blip
+#   "sdk_missing"      -> bittensor not importable
+#   "other"            -> anything else (decode/unexpected)
+LAST_FAILURE: str = "ok"
+
+
+def classify_chain_error(exc: BaseException) -> str:
+    """Map a chain-read exception to a coarse reason flag (see LAST_FAILURE)."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if (
+        "storagefunctionnotfound" in text
+        or "storage function" in text
+        or ("metadata" in text and ("decode" in text or "not found" in text))
+    ):
+        return "storage_mismatch"
+    if any(
+        k in text
+        for k in (
+            "connection", "websocket", "timeout", "timed out", "unreachable",
+            "refused", "reset", "eof", "broken pipe", "ssl", "handshake",
+        )
+    ):
+        return "unreachable"
+    return "other"
+
 
 def _as_float(x) -> float:
     """Balance objects expose .tao; plain numbers pass through."""
@@ -137,11 +169,13 @@ def get_wallet_stakes_via_chain(
 ) -> Optional[dict[int, float]]:
     """Read per-subnet stake for `coldkey` off-chain. See module docstring for
     the None / {} / {..} contract."""
+    global LAST_FAILURE
     try:
         import bittensor as bt
     except Exception as e:  # SDK not installed (e.g. dep not yet added)
         logger.info(f"chain_fetch: bittensor SDK unavailable ({e}) — caller falls back")
         _diag(f"SDK UNAVAILABLE ({e}) -> falling back to taostats")
+        LAST_FAILURE = "sdk_missing"
         return None
 
     _patch_asi_close_bug()  # must run before any Subtensor/SubstrateInterface use
@@ -155,12 +189,14 @@ def get_wallet_stakes_via_chain(
         prices = sub.get_subnet_prices()
         balances = stakes_to_tao_dict(stake_infos, prices)
     except Exception as e:
+        LAST_FAILURE = classify_chain_error(e)
         logger.warning(f"chain_fetch: chain read failed ({e}) — caller falls back to taostats")
-        _diag(f"CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back to taostats")
+        _diag(f"CHAIN READ FAILED ({type(e).__name__}: {e}) [{LAST_FAILURE}] -> falling back to taostats")
         import traceback as _tb; _diag("TRACE: " + " | ".join(_tb.format_exc().strip().splitlines()[-3:]))
         _safe_close(sub)
         return None
     # Read succeeded — clean up defensively (cleanup errors must not fail it).
+    LAST_FAILURE = "ok"
     _safe_close(sub)
     logger.info(
         f"chain_fetch: read {len(balances)} positions for "
