@@ -1290,31 +1290,12 @@ def run(
             except Exception as he:
                 logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
 
-            # (1) taostats overlay — instant, primary. Guarded by api_key;
-            # credit-wall keeps store deltas only (no blank, no fabrication).
+            # Store-only momentum. The taostats overlay (fetch_pool_overlay) is
+            # removed: credits are exhausted and the snapshot store already
+            # carries 1h/24h/7d/30d for free as it accumulates. Fear & Greed was
+            # a taostats-only field and is dropped (dashboard shows "—").
             fng_index = None
             fng_sentiment = ""
-            print(f"[probe] api_key present={bool(api_key)}", file=sys.stderr, flush=True)
-            if api_key:
-                try:
-                    from taostats_fetch import fetch_pool_overlay, TaostatsCreditsExhausted
-                    ov = fetch_pool_overlay(client)
-                    print(f"[probe] overlay returned: deltas={len(ov.get('deltas') or {})} fng={ov.get('fear_and_greed')}", file=sys.stderr, flush=True)
-                    for _nid, _od in (ov.get("deltas") or {}).items():
-                        _merged = dict(deltas.get(_nid) or {})
-                        _merged.update(_od)          # taostats wins overlapping horizons
-                        deltas[_nid] = _merged
-                    _fng = ov.get("fear_and_greed")
-                    if _fng:
-                        fng_index = _fng.get("index")
-                        fng_sentiment = _fng.get("sentiment", "")
-                    print(f"[probe] overlay parsed: fng_index={fng_index}", file=sys.stderr, flush=True)
-                except TaostatsCreditsExhausted as ce:
-                    print(f"[probe] overlay CREDIT-WALLED: {ce}", file=sys.stderr, flush=True)
-                except Exception as oe:
-                    import traceback
-                    print(f"[probe] overlay FAILED: {type(oe).__name__}: {oe}", file=sys.stderr, flush=True)
-                    traceback.print_exc()
 
             # our horizon key -> the field name gordie.html parses
             _DKEY = {"1h": "price_change_1_hour", "24h": "price_change_1_day",
