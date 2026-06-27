@@ -80,6 +80,23 @@ logger = logging.getLogger("tao_scoring_runner")
 CURRENT_HOLDINGS = [0, 4, 9, 44, 46, 55, 68, 107, 123]
 TOP_N = 5  # reduced from 10 — keeps alerts shorter
 
+
+def _local_hhmm(iso_ts: str) -> str:
+    """HH:MM in Europe/London (BST/GMT aware) from a UTC isoformat string.
+
+    Falls back to a UTC-labelled slice if the container lacks tzdata, so the
+    digest is never silently an hour off without saying so.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return (
+            datetime.fromisoformat(iso_ts)
+            .astimezone(ZoneInfo("Europe/London"))
+            .strftime("%H:%M")
+        )
+    except Exception:
+        return iso_ts[11:16] + " UTC"
+
 # Alert frequency control
 DIGEST_INTERVAL_HOURS = int(os.environ.get("DIGEST_HOURS", 4))
 STATE_FILE = Path(os.environ.get("STATE_FILE", str(Path(__file__).parent / "scoring_state.json")))
@@ -1349,7 +1366,7 @@ def run(
         # `plan` (the object an execution agent consumes). Free-τ folded in.
         # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
         msg = format_actionable_digest(
-            plan, free_tao=free_tao, account_tao=account_total_tao, ts=result.timestamp[11:16],
+            plan, free_tao=free_tao, account_tao=account_total_tao, ts=_local_hhmm(result.timestamp),
             fundamentals=load_fundamentals(),
         )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
