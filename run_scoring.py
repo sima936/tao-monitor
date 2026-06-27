@@ -1477,6 +1477,7 @@ def main():
     prefetched_balances = None
     wallet_read_failed = False
     credits_exhausted = False
+    storage_mismatch = False
     if args.holdings:
         holdings = [int(x.strip()) for x in args.holdings.split(",")]
     else:
@@ -1490,10 +1491,14 @@ def main():
         # None if the SDK is missing or the chain is unreachable -> fall back.
         try:
             from chain_fetch import get_wallet_stakes_via_chain
+            import chain_fetch as _cf
             prefetched_balances = get_wallet_stakes_via_chain()
+            chain_fail_reason = getattr(_cf, "LAST_FAILURE", "ok") if not prefetched_balances else "ok"
         except Exception as e:
             logger.warning(f"Chain wallet read errored ({e}) — falling back to taostats")
             prefetched_balances = None
+            chain_fail_reason = "other"
+        storage_mismatch = (chain_fail_reason == "storage_mismatch")
         if prefetched_balances:
             logger.info(f"Wallet read via chain RPC: {len(prefetched_balances)} positions (free)")
         else:
@@ -1514,6 +1519,21 @@ def main():
         if prefetched_balances:
             holdings = sorted(prefetched_balances)
             logger.info(f"Wallet holdings from chain: {holdings} ({len(holdings)} subnets)")
+            # Chain read hit a storage mismatch but taostats covered this cycle.
+            # The cron is silently running on the credit-burning fallback after a
+            # runtime upgrade — flag it now so the SDK gets bumped before credits drain.
+            if storage_mismatch and args.telegram_token and args.telegram_chat:
+                logger.warning("Chain storage mismatch — taostats rescued; alerting to bump SDK.")
+                send_telegram(
+                    "\U0001f527 TAO MONITOR — chain storage mismatch (running on fallback)\n\n"
+                    "The bittensor SDK queried a storage key the finney runtime no "
+                    "longer exposes — almost certainly a runtime upgrade ahead of the "
+                    "pinned SDK (this is NOT a credits problem). taostats covered this "
+                    "cycle, so the book still updated, but the cron is burning credits "
+                    "on the fallback. Bump the bittensor pin in requirements.txt and "
+                    "redeploy to return to the free chain read.",
+                    args.telegram_token, args.telegram_chat,
+                )
         else:
             wallet_read_failed = True
             holdings = CURRENT_HOLDINGS  # unused — we skip below; kept to avoid unbound var
@@ -1524,7 +1544,17 @@ def main():
             "(no phantom-book compute on stale CURRENT_HOLDINGS)."
         )
         if args.telegram_token and args.telegram_chat:
-            if credits_exhausted:
+            if storage_mismatch:
+                send_telegram(
+                    "\U0001f527 TAO MONITOR — chain storage mismatch\n\n"
+                    "The bittensor SDK queried a storage key the finney runtime "
+                    "no longer exposes — almost certainly a runtime upgrade ahead "
+                    "of the pinned SDK (this is NOT a credits problem). Bump the "
+                    "bittensor pin in requirements.txt and redeploy. Holding last "
+                    "state — no scoring, no stops, no changes.",
+                    args.telegram_token, args.telegram_chat,
+                )
+            elif credits_exhausted:
                 send_telegram(
                     "\U0001f7e0 TAO MONITOR — taostats credits exhausted\n\n"
                     "API quota is at zero, so I can't read your positions. Holding "
