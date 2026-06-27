@@ -1339,15 +1339,9 @@ def run(
                     if fng_sentiment:
                         row["fear_and_greed_sentiment"] = fng_sentiment
                 _pool_rows.append(row)
-            _have = sum(1 for r in _pool_rows if "price_change_1_day" in r)
-            _src = "taostats+store" if fng_index is not None else "store-only"
-            print(f"[probe] Pools snapshot: 24h deltas on {_have}/{len(_pool_rows)} subnets ({_src}); F&G={fng_index if fng_index is not None else chr(8212)}", file=sys.stderr, flush=True)
             push_snapshot_to_dashboard("pools", json.dumps({"data": _pool_rows}))
-            print("[probe] pools snapshot PUSHED ok", file=sys.stderr, flush=True)
     except Exception as e:
-        import traceback
-        print(f"[probe] pools push EXCEPTION: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        traceback.print_exc()
+        logger.warning(f"pools snapshot push failed: {type(e).__name__}: {e}")
 
     elapsed = time.time() - start_time
     logger.info(
@@ -1398,7 +1392,7 @@ def run(
         else:
             msg += f"\n\n\U0001F4CA store: error ({_s['error']})"
     except Exception as _se:
-        print(f"[probe] store footer skipped: {_se}", file=sys.stderr, flush=True)
+        logger.debug(f"store footer skipped: {_se}")
 
     print(msg)
 
