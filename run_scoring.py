@@ -1243,6 +1243,7 @@ def run(
                 send_telegram(format_stop_alert(stop_events), telegram_token, telegram_chat)
 
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
+    _fundamentals = load_fundamentals()
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
@@ -1251,6 +1252,7 @@ def run(
         cut_since=cut_since_in,                  # OPEN #6 — persistent confirmation streak
         now_ts=time.time(),
         force_exit=force_exit,                   # STEP 2 — stops override floor + gate
+        fundamentals=_fundamentals,              # #3 — AVOID verdict caps ADDs/entries
     )
     # Persist the updated confirmation streak for the next cron. JSON stringifies
     # int keys, so they're coerced back to int on load (cut_since_in above).
@@ -1361,7 +1363,7 @@ def run(
         # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
         msg = format_actionable_digest(
             plan, free_tao=free_tao, account_tao=account_total_tao, ts=_local_hhmm(result.timestamp),
-            fundamentals=load_fundamentals(),
+            fundamentals=_fundamentals,
         )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
         # fwd_return_* backfilled later — no lookahead. Non-fatal. (KEEP.)
