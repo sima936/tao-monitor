@@ -82,6 +82,14 @@ class AllocationPolicy:
     deploy_signal_lo:  float = -0.30   # at/below this signal → floor
     deploy_ceiling:    float = 1.00    # max fraction deployed
     deploy_floor:      float = 0.30    # min fraction deployed (rest → SN0)
+    bear_deploy_cap:   float = 0.50    # macro Bear → HARD CEILING on the deployed fraction,
+                                       # regardless of a mildly-positive forward signal. The dial
+                                       # (deployed_fraction) reads the SIGNAL only; this is what
+                                       # makes the regime LABEL bite, so "Bear · defensive" can't
+                                       # emit "100% · full risk-on". PLACEHOLDER — Simon's risk call:
+                                       # 0.30 = capital-preservation (== floor, Bear pins at floor);
+                                       # 0.50 = defensive but still signal-aware inside Bear.
+                                       # Hermes-tunable later (one scalar).
     unknown_macro_fraction: float = 1.00   # macro unavailable → still fully deployed
 
     # ── Axis 2: tiering off health_score.
@@ -97,6 +105,11 @@ class AllocationPolicy:
                                            # engine's macro_allows_entries (= MACRO_SIGNAL_DIVERGENCE_EPS)
                                            # so the plan can't ENTER while the buy list says WATCH ONLY.
                                            # Holdings are unaffected (still held/trimmed/cut).
+    avoid_blocks_adds: bool = True         # #3 — fundamentals verdict AVOID → never ADD to / ENTER that
+                                           # name: cap its target at current weight (HOLD or TRIM toward
+                                           # exit only), freed weight → SN0. Mirrors the pending-exit /
+                                           # no-net-buy cap. Held AVOID can't grow; un-held AVOID can't be
+                                           # entered. Requires `fundamentals` to be passed in; inert if not.
 
     # ── Conviction guard. Named real-utility verticals are exempt from the
     #    MARGINAL health-floor cut (NOT the Bear-regime cut): instead of →SN0
@@ -249,6 +262,7 @@ def compute_target_allocation(
     cut_since: Optional[dict] = None,                   # {sid:{"since_ts","reason"}} from prev_state
     now_ts: Optional[float] = None,                     # wall-clock epoch; enables time-confirmation
     force_exit: Optional[dict] = None,                  # {sid: "trail_stop"/"hard_stop"} — STEP 2 stop override
+    fundamentals: Optional[dict] = None,                # {sid: record|verdict} — #3: AVOID caps ADDs/entries
 ) -> AllocationPlan:
     """Derive the target allocation.
 
@@ -269,6 +283,19 @@ def compute_target_allocation(
     signal = float(getattr(macro, "signal", 0.0) or 0.0)
     regime = getattr(getattr(macro, "regime", None), "value", None) or str(getattr(macro, "regime", "Unknown"))
 
+    # #3 — subnet_ids the fundamentals layer flags AVOID. These can be HELD/TRIMmed
+    # but never ADDed to or newly ENTERed (cap target at current below). Verdict may
+    # be a bare string or a {"verdict": ...} record; keys may be int or str.
+    avoid_set: set[int] = set()
+    if policy.avoid_blocks_adds and fundamentals:
+        for k, rec in fundamentals.items():
+            v = (rec.get("verdict") if isinstance(rec, dict) else rec)
+            if isinstance(v, str) and v.strip().upper() == "AVOID":
+                try:
+                    avoid_set.add(int(k))
+                except (TypeError, ValueError):
+                    continue
+
     # ── Axis 1 ────────────────────────────────────────────────────────────────
     if macro_available:
         f = deployed_fraction(signal, policy)
@@ -277,6 +304,13 @@ def compute_target_allocation(
             f"(ramp {policy.deploy_floor:.0%}@{policy.deploy_signal_lo:+.2f} → "
             f"{policy.deploy_ceiling:.0%}@{policy.deploy_signal_hi:+.2f})."
         )
+        if regime == "Bear" and f > policy.bear_deploy_cap:
+            notes.append(
+                f"Macro Bear regime gate: deploy capped {f:.0%} → {policy.bear_deploy_cap:.0%} "
+                f"— a Bear label can't go risk-on on a positive forward signal; "
+                f"the excess parks in SN0."
+            )
+            f = policy.bear_deploy_cap
     else:
         f = policy.unknown_macro_fraction
         notes.append("Macro unavailable — deployed fraction set conservatively; treat new entries as deferred.")
@@ -486,6 +520,13 @@ def compute_target_allocation(
             if (not allow_buys) and cur is not None:
                 tw = min(tw, cur)
                 drift = cur - tw
+            # Fundamentals AVOID (#3): never grow or enter an AVOID name. Cap at
+            # current so it can only HOLD or TRIM toward exit; freed weight → SN0.
+            # Same idiom as the pending-exit / no-net-buy caps above.
+            if (sid in avoid_set) and cur is not None and tw > cur:
+                tw = min(tw, cur)
+                drift = cur - tw
+                capped_flags[sid] = "avoid"
             action, reason = _decide_action(cur, tw, drift, policy)
             if is_pending:
                 p_reason, p_elapsed = pending_meta[sid]
