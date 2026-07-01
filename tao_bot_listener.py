@@ -54,9 +54,9 @@ MACRO_FILE = SCRIPT_DIR / "tao_macro.json"
 STATE_FILE = SCRIPT_DIR / "scoring_state.json"
 
 POLL_INTERVAL = 2   # seconds between Telegram getUpdates polls
-COMMAND_COOLDOWN = 30  # seconds — ignore repeated commands within this window
+COMMAND_COOLDOWN = 30  # seconds — ignore repeated *same* command within this window
 
-_last_command_ts: float = 0
+_last_command_ts: dict[str, float] = {}
 _last_update_id: int = 0
 
 
@@ -212,8 +212,6 @@ HANDLERS = {
 
 
 def process_update(update: dict) -> None:
-    global _last_command_ts
-
     message = update.get("message", {})
     text = message.get("text", "").strip().lower().split("@")[0]  # strip @botname suffix
     from_id = str(message.get("chat", {}).get("id", ""))
@@ -226,13 +224,15 @@ def process_update(update: dict) -> None:
     if text not in HANDLERS:
         return
 
-    # Cooldown to prevent double-triggers
+    # Cooldown to prevent double-triggers — per command, so /macro then /holdings
+    # back-to-back doesn't silently drop the second one.
     now = time.time()
-    if now - _last_command_ts < COMMAND_COOLDOWN:
+    last = _last_command_ts.get(text, 0)
+    if now - last < COMMAND_COOLDOWN:
         logger.info(f"Command '{text}' ignored — cooldown active")
         return
 
-    _last_command_ts = now
+    _last_command_ts[text] = now
     logger.info(f"Handling command: {text}")
     HANDLERS[text]()
 
@@ -245,7 +245,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("TAO bot listener started — polling for commands")
-    
+
 
     while True:
         try:
