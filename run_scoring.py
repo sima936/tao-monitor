@@ -65,6 +65,7 @@ from subnet_allocation import (
     format_allocation_plan,
     format_actionable_digest,
 )
+from spot_price import get_tao_prices
 from geckoterminal_fetch import fetch_history_for_netuids
 
 logger = logging.getLogger("tao_scoring_runner")
@@ -1361,9 +1362,14 @@ def run(
         # Cron path — lean, action-only digest on the 7-rung ladder, sourced from
         # `plan` (the object an execution agent consumes). Free-τ folded in.
         # Evidence lives on the dashboard; 🚨 stop ping stays a separate message.
+        _prices = get_tao_prices()  # {"usd": .., "gbp": ..} or None (soft-fail)
+        _root_tao = bal_by_netuid.get(0, 0.0) if bal_by_netuid else None
         msg = format_actionable_digest(
             plan, free_tao=free_tao, account_tao=account_total_tao, ts=_local_hhmm(result.timestamp),
             fundamentals=_fundamentals,
+            root_tao=_root_tao,
+            tao_usd=(_prices or {}).get("usd"),
+            tao_gbp=(_prices or {}).get("gbp"),
         )
         # Pre-Hermes calibration: one dial row per cron (signal → deployed f).
         # fwd_return_* backfilled later — no lookahead. Non-fatal. (KEEP.)
