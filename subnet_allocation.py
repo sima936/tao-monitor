@@ -694,7 +694,17 @@ def format_allocation_plan(plan: AllocationPlan, account_tao: Optional[float] = 
 # lands; until then it renders nothing.
 # ─────────────────────────────────────────────────────────────────────────────
 def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None,
-                             fundamentals=None) -> str:
+                             fundamentals=None, root_tao=None,
+                             tao_usd=None, tao_gbp=None) -> str:
+    """
+    account_tao: staked total (all subnets incl. SN0 root). Existing meaning
+        preserved so the position sizing helpers (tao(), move()) still measure
+        weights against the staked base — no behavioural change.
+    root_tao: SN0 root-delegated portion of account_tao (bal_by_netuid[0]).
+        Used only to split the display line into root/alpha/free.
+    tao_usd / tao_gbp: live spot for the fiat parenthetical. Either can be None
+        and the line degrades silently (still shows τ totals).
+    """
     DOT = {"Bull": "🟢", "Bear": "🔴", "Sideways": "⚪"}
 
     from subnet_scoring_engine import macro_stance  # canonical stance (single source)
@@ -777,6 +787,33 @@ def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None,
             L.append(f"🟢 Rotate free {free_tao:.2f}τ → greens (dial full risk-on)")
         else:
             L.append(f"🅿️ Park free {free_tao:.2f}τ → SN0 (dial {plan.deployed_fraction:.0%}, soft)")
-    acct = f" · acct ~{account_tao:.1f}τ" if account_tao else ""
-    L.append(f"⏰ {ts or '—'}{acct} · details → dashboard")
+    # Account tail — split root / alpha / free with fiat.
+    # Caller convention (see run_scoring L1365):
+    #   account_tao = account_total_tao = STAKED + FREE (whole tradeable book)
+    #   free_tao    = unstaked liquid
+    #   root_tao    = SN0 root-delegated portion of STAKED
+    # Derived:
+    #   staked = account_tao - free_tao
+    #   alpha  = staked - root_tao   (subnet positions ex-root)
+    # Any missing input degrades to the previous single-line form.
+    fiat = ""
+    if account_tao and tao_usd is not None and tao_gbp is not None:
+        fiat = f" (~£{account_tao*tao_gbp:,.0f} / ${account_tao*tao_usd:,.0f})"
+    elif account_tao and tao_gbp is not None:
+        fiat = f" (~£{account_tao*tao_gbp:,.0f})"
+    elif account_tao and tao_usd is not None:
+        fiat = f" (~${account_tao*tao_usd:,.0f})"
+    acct = f" · acct ~{account_tao:.1f}τ{fiat}" if account_tao else ""
+    # Split root/alpha/free onto its own line only when we have the decomposition.
+    # Old callers (no root_tao, no fiat) get the original one-line form unchanged.
+    if account_tao and root_tao is not None:
+        staked = max(0.0, account_tao - (free_tao or 0.0))
+        alpha_tao = max(0.0, staked - root_tao)
+        L.append(f"⏰ {ts or '—'}{acct}")
+        L.append(
+            f"        root {root_tao:.1f} · alpha {alpha_tao:.1f} · "
+            f"free {(free_tao or 0.0):.1f} · details → dashboard"
+        )
+    else:
+        L.append(f"⏰ {ts or '—'}{acct} · details → dashboard")
     return "\n".join(L)
