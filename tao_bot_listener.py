@@ -91,32 +91,134 @@ def get_updates(offset: int) -> list[dict]:
     return []
 
 
-def handle_status() -> None:
-    """Run a full scoring cycle and send results."""
-    send("⏳ Running scoring cycle...")
-    try:
-        # Fetch real holdings from chain
-        holdings = fetch_wallet_holdings(API_KEY)
-        if not holdings:
-            send("⚠️ Could not fetch wallet holdings from chain")
-            return
+def _dashboard_url() -> str | None:
+    """Derive the dashboard score endpoint from DASHBOARD_URL, or fall back to
+    DASHBOARD_INGEST_URL by swapping /api/ingest-score -> /api/score (the same
+    URL scheme run_scoring.py uses to POST). Returns None if neither is set."""
+    url = os.environ.get("DASHBOARD_URL", "").strip()
+    if url:
+        return url.rstrip("/") + "/api/score"
+    ingest = os.environ.get("DASHBOARD_INGEST_URL", "").strip()
+    if ingest and "ingest-score" in ingest:
+        return ingest.replace("ingest-score", "score")
+    return None
 
-        holdings_str = ",".join(str(h) for h in holdings)
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "run_scoring.py"),
-             "--no-concentration", "--force-send",
-             "--holdings", holdings_str],
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ},
-        )
-        if result.returncode != 0:
-            send(f"🔴 Scoring run failed:\n<pre>{result.stderr[-500:]}</pre>")
-        else:
-            logger.info("Status command: scoring run completed")
-    except subprocess.TimeoutExpired:
-        send("🔴 Scoring run timed out (>60s)")
+
+def _fetch_latest_score() -> dict | None:
+    """GET the last-ingested cron payload from serve.py. Uses BasicAuth
+    (DASHBOARD_USER/PASS). Returns None on any failure — caller surfaces it."""
+    url = _dashboard_url()
+    if not url:
+        return None
+    user = os.environ.get("DASHBOARD_USER", "tao")
+    pwd = os.environ.get("DASHBOARD_PASS", "bittensor")
+    try:
+        r = requests.get(url, auth=(user, pwd), timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("status") == "awaiting_first_scan":
+            return None
+        return data
     except Exception as e:
-        send(f"🔴 Error running scoring: {e}")
+        logger.warning(f"Dashboard fetch failed: {e}")
+        return None
+
+
+def _format_status_from_payload(data: dict) -> str:
+    """Render the on-demand /status message from the cron payload cached on
+    serve.py. Uses the same layout as the 6h actionable digest so figures are
+    consistent across on-demand and scheduled views."""
+    # Local imports so a missing module in a legacy container still starts the
+    # bot for /macro and /holdings (which don't need these).
+    from types import SimpleNamespace
+    from subnet_allocation import format_actionable_digest
+    from spot_price import get_tao_prices
+
+    macro = data.get("macro") or {}
+    alloc = data.get("allocation") or {}
+
+    # Reconstruct just enough of the AllocationPlan surface that the formatter
+    # touches. We don't need the full dataclass — SimpleNamespace with the
+    # attributes the formatter reads is sufficient (regime/signal/positions/
+    # cut/deployed_fraction/sn0_target_weight).
+    positions = []
+    for p in alloc.get("positions") or []:
+        positions.append(SimpleNamespace(
+            subnet_id=int(p.get("subnet_id")),
+            name=p.get("name") or "",
+            action=p.get("action") or "hold",
+            current_weight=p.get("current_weight"),
+            target_weight=p.get("target_weight") or 0.0,
+            markov_regime=p.get("markov_regime") or "",
+            reason=p.get("reason") or "",
+            pending_exit=bool(p.get("pending_exit")),
+            pending_entry=bool(p.get("pending_entry")),
+        ))
+    plan = SimpleNamespace(
+        macro_regime=macro.get("regime") or "Unknown",
+        macro_signal=float(macro.get("signal") or 0.0),
+        deployed_fraction=float(alloc.get("deployed_fraction") or 0.0),
+        sn0_target_weight=float(alloc.get("sn0_target_weight") or 0.0),
+        positions=positions,
+        cut=alloc.get("cut") or [],
+    )
+
+    # Fundamentals for the ⚠️ Fund line — read the same file the cron reads.
+    fundamentals = {}
+    try:
+        fp = SCRIPT_DIR / "fundamentals.json"
+        if fp.exists():
+            fundamentals = (json.loads(fp.read_text()) or {}).get("subnets", {}) or {}
+    except Exception:
+        pass
+
+    prices = get_tao_prices() or {}
+    # ts: cron timestamp is ISO; render HH:MM in the user's local zone if we can.
+    ts_iso = data.get("timestamp") or ""
+    ts_hhmm = "—"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        ts_hhmm = dt.astimezone(ZoneInfo("Europe/London")).strftime("%H:%M")
+    except Exception:
+        ts_hhmm = ts_iso[11:16] if len(ts_iso) >= 16 else "—"
+
+    account_total_tao = data.get("account_total_tao")
+    free_tao = data.get("free_tao")
+    # Root-stake TAO — added to the payload by run_scoring so /status can
+    # render the same root/alpha/free split as the 6h cron digest. Older
+    # payloads (pre-fix) won't have it → the tail gracefully degrades.
+    root_tao = data.get("root_tao")
+
+    return format_actionable_digest(
+        plan,
+        free_tao=free_tao,
+        account_tao=account_total_tao,
+        ts=ts_hhmm,
+        fundamentals=fundamentals,
+        root_tao=root_tao,
+        tao_usd=prices.get("usd"),
+        tao_gbp=prices.get("gbp"),
+    )
+
+
+def handle_status() -> None:
+    """Render the latest cron snapshot from serve.py — same data path as the
+    dashboard. Replaces the old subprocess-run-scoring approach, which failed
+    because the listener container has no persistent snapshot history."""
+    data = _fetch_latest_score()
+    if not data:
+        send(
+            "⚠️ /status unavailable — dashboard hasn't ingested a scoring run yet, "
+            "or DASHBOARD_URL/DASHBOARD_INGEST_URL is unset. Next cron will populate it."
+        )
+        return
+    try:
+        send(_format_status_from_payload(data))
+    except Exception as e:
+        logger.exception("Status format failed")
+        send(f"🔴 Status format failed: {e}")
 
 
 def handle_macro() -> None:
