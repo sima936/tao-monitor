@@ -1273,6 +1273,12 @@ def run(
         _payload["free_tao"] = free_tao
         _payload["account_total_tao"] = account_total_tao
         _payload["balance_total_tao"] = balance_total_tao
+        # Root-stake TAO (SN0 delegation) — enables the /status listener to
+        # render the same root/alpha/free split as the cron digest without
+        # doing its own chain read.
+        _payload["root_tao"] = (
+            bal_by_netuid.get(0, 0.0) if bal_by_netuid else None
+        )
         payload_json = json.dumps(_payload)
     except Exception as e:
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
