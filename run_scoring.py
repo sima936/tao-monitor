@@ -1007,6 +1007,39 @@ def run(
 
     logger.info(f"Fetched {len(all_metrics)} subnet metrics")
 
+    # ─── New-subnet detector ─────────────────────────────────────────────────
+    # A subnet appearing at a netuid we haven't seen before means someone just
+    # registered (or a previously-deregistered slot was re-registered by a new
+    # team — same "day-zero pump" window either way). Fire a separate 🆕 ping
+    # so the user can front-run the bonding-curve entry rather than waiting
+    # for the next 6h digest.
+    #
+    # First-ever run has no known set → we baseline silently, no spam.
+    # Subsequent runs compare and alert only on additions.
+    try:
+        current_netuids = {int(m.subnet_id) for m in all_metrics}
+        known_netuids = set(prev_state.get("known_netuids") or [])
+        if known_netuids:
+            new_netuids = sorted(current_netuids - known_netuids)
+            if new_netuids and telegram_token and telegram_chat:
+                # Build a compact alert — one line per new subnet with name
+                # (may be blank/placeholder on day-zero) + a tao.app link.
+                by_id = {int(m.subnet_id): m for m in all_metrics}
+                lines = ["🆕 NEW SUBNET DETECTED"]
+                for nid in new_netuids[:10]:   # cap in case of a batch
+                    m = by_id.get(nid)
+                    name = (getattr(m, "name", "") or "").strip() or "(unnamed)"
+                    lines.append(f"SN{nid} · {name}")
+                lines.append(f"Total: {len(known_netuids)} → {len(current_netuids)}")
+                lines.append(f"Check: https://tao.app/subnets/{new_netuids[0]}")
+                send_telegram("\n".join(lines), telegram_token, telegram_chat)
+                logger.warning(f"NEW SUBNETS: {new_netuids}")
+        # Persist current set for next-run comparison (JSON stringifies ints
+        # fine; sorted list keeps the file diff-friendly).
+        prev_state["known_netuids"] = sorted(current_netuids)
+    except Exception as e:
+        logger.warning(f"New-subnet detector skipped: {e}")
+
     # Apply the disk Gini cache first (Infinity8 path), where available.
     all_metrics = apply_gini_overrides(all_metrics, gini_cache)
 
