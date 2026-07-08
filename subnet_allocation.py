@@ -110,6 +110,11 @@ class AllocationPolicy:
                                            # exit only), freed weight → SN0. Mirrors the pending-exit /
                                            # no-net-buy cap. Held AVOID can't grow; un-held AVOID can't be
                                            # entered. Requires `fundamentals` to be passed in; inert if not.
+    watch_blocks_adds: bool = True         # WATCH mirrors AVOID for ADD/ENTER capping. Distinct semantics:
+                                           # WATCH = "pending verdict, freeze growth"; AVOID = "actively bad,
+                                           # trim toward exit". Both cap the target at current so the plan
+                                           # can't ADD to a flagged name while the caution line surfaces it.
+                                           # Fixes the SN44/SN68 "⚠️ WATCH + 🟢 ADD same digest" contradiction.
 
     # ── Conviction guard. Named real-utility verticals are exempt from the
     #    MARGINAL health-floor cut (NOT the Bear-regime cut): instead of →SN0
@@ -283,18 +288,26 @@ def compute_target_allocation(
     signal = float(getattr(macro, "signal", 0.0) or 0.0)
     regime = getattr(getattr(macro, "regime", None), "value", None) or str(getattr(macro, "regime", "Unknown"))
 
-    # #3 — subnet_ids the fundamentals layer flags AVOID. These can be HELD/TRIMmed
-    # but never ADDed to or newly ENTERed (cap target at current below). Verdict may
+    # #3 — subnet_ids the fundamentals layer flags. AVOID and WATCH both cap
+    # ADDs/entries at current weight (HOLD or TRIM only); AVOID additionally reads
+    # as "trim toward exit", WATCH as "freeze growth pending verdict". Verdict may
     # be a bare string or a {"verdict": ...} record; keys may be int or str.
     avoid_set: set[int] = set()
-    if policy.avoid_blocks_adds and fundamentals:
+    watch_set: set[int] = set()
+    if fundamentals:
         for k, rec in fundamentals.items():
             v = (rec.get("verdict") if isinstance(rec, dict) else rec)
-            if isinstance(v, str) and v.strip().upper() == "AVOID":
-                try:
-                    avoid_set.add(int(k))
-                except (TypeError, ValueError):
-                    continue
+            if not isinstance(v, str):
+                continue
+            v_norm = v.strip().upper()
+            try:
+                sid = int(k)
+            except (TypeError, ValueError):
+                continue
+            if v_norm == "AVOID" and policy.avoid_blocks_adds:
+                avoid_set.add(sid)
+            elif v_norm == "WATCH" and policy.watch_blocks_adds:
+                watch_set.add(sid)
 
     # ── Axis 1 ────────────────────────────────────────────────────────────────
     if macro_available:
@@ -520,13 +533,18 @@ def compute_target_allocation(
             if (not allow_buys) and cur is not None:
                 tw = min(tw, cur)
                 drift = cur - tw
-            # Fundamentals AVOID (#3): never grow or enter an AVOID name. Cap at
-            # current so it can only HOLD or TRIM toward exit; freed weight → SN0.
-            # Same idiom as the pending-exit / no-net-buy caps above.
+            # Fundamentals AVOID/WATCH (#3): never grow or enter a flagged name.
+            # Cap at current so it can only HOLD or TRIM toward exit; freed weight
+            # → SN0. Same idiom as the pending-exit / no-net-buy caps above. AVOID
+            # takes precedence over WATCH if a record somehow carries both.
             if (sid in avoid_set) and cur is not None and tw > cur:
                 tw = min(tw, cur)
                 drift = cur - tw
                 capped_flags[sid] = "avoid"
+            elif (sid in watch_set) and cur is not None and tw > cur:
+                tw = min(tw, cur)
+                drift = cur - tw
+                capped_flags[sid] = "watch"
             action, reason = _decide_action(cur, tw, drift, policy)
             if is_pending:
                 p_reason, p_elapsed = pending_meta[sid]
@@ -782,9 +800,25 @@ def format_actionable_digest(plan, free_tao=None, account_tao=None, ts=None,
                 seen.add(sid)
         if cautions:
             L.append("⚠️ Fund: " + " · ".join(cautions))
+    # SN0 reconciliation for the tail. The plan emits sn0_target_weight but never
+    # compares it to actual root_tao — so when SN0 is OVER-target and alphas are
+    # UNDER-target, the correct action is to UNSTAKE SN0 to fund the ADDs, not to
+    # park free INTO an already-overweight SN0. Three states:
+    #   • Dial ≥ 99.9%     → risk-on, rotate free into greens
+    #   • SN0 over-target  → source SN0 unstake + free to fund ADDs
+    #   • SN0 at/under-tgt → park free → SN0 (original behaviour)
+    # Deadband 0.05τ so tiny deltas don't flip the message. Degrades to original
+    # form when root_tao or account_tao is missing (old callers unaffected).
     if free_tao is not None and free_tao > 0.005:
+        sn0_target_tao = (plan.sn0_target_weight or 0.0) * (account_tao or 0.0)
+        sn0_delta = (root_tao or 0.0) - sn0_target_tao  # +ve = over-target = source
         if plan.deployed_fraction >= 0.999:
             L.append(f"🟢 Rotate free {free_tao:.2f}τ → greens (dial full risk-on)")
+        elif root_tao is not None and account_tao and sn0_delta > 0.05:
+            L.append(
+                f"🔄 Unstake {sn0_delta:.2f}τ SN0 + free {free_tao:.2f}τ → fund ADDs "
+                f"(SN0 over target by {sn0_delta:.2f}τ)"
+            )
         else:
             L.append(f"🅿️ Park free {free_tao:.2f}τ → SN0 (dial {plan.deployed_fraction:.0%}, soft)")
     # Account tail — split root / alpha / free with fiat.
