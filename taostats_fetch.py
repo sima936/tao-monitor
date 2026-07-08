@@ -680,6 +680,49 @@ def _synthetic_history(
     return [round(p, 8) for p in segment]
 
 
+def fetch_subnet_identities(client: TaostatsClient) -> dict[int, dict]:
+    """Fetch on-chain subnet identity for every netuid — one call, structured JSON.
+
+    Uses the /api/subnet/identity/v1 endpoint (docs.taostats.io). Returns
+    {netuid: {name, url, github, discord, description, contact}}. Empty dict on
+    failure so callers degrade cleanly (alerts still fire, just without the
+    enrichment fields). Costs one taostats API call per invocation — cheap
+    enough to run once per cron.
+
+    This is the authoritative source for subnet metadata: owners set identity
+    on-chain via extrinsic, taostats reflects it within minutes. Makes 🆕 and
+    dereg alerts self-describing (name + website + description + github) and
+    doubles as an automatic rotation detector for fundamentals.json — SN15
+    ORO, SN40 Ralph, SN58 greevils all show up here as their current identity.
+    """
+    try:
+        resp = client.get("/api/subnet/identity/v1", params={"limit": 200})
+    except Exception as e:
+        logger.warning(f"Subnet identity fetch failed: {e}")
+        return {}
+    out: dict[int, dict] = {}
+    for row in (resp.get("data") or []):
+        try:
+            nid = int(row.get("netuid"))
+        except (TypeError, ValueError):
+            continue
+        # Normalise nulls → empty string; strip whitespace. Keep only the
+        # fields we consume in alerts (skip 'additional' — mostly promo text).
+        def _s(k: str) -> str:
+            v = row.get(k)
+            return (str(v).strip() if v is not None else "")
+        out[nid] = {
+            "name":        _s("subnet_name"),
+            "url":         _s("subnet_url"),
+            "github":      _s("github_repo"),
+            "discord":     _s("discord"),
+            "description": _s("description"),
+            "contact":     _s("subnet_contact"),
+        }
+    logger.info(f"Subnet identity fetch OK — {len(out)} netuids")
+    return out
+
+
 def fetch_all_subnet_metrics(
     client: TaostatsClient,
     fetch_concentration: bool = True,
