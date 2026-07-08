@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis
+from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis, fetch_subnet_identities
 from tp_cl_stops import evaluate_stops, append_outcome_log, append_dial_log, format_stop_alert, TRAIL_PCT, STOP_PCT
 from subnet_scoring_engine import (
     run_scoring_cycle,
@@ -1007,6 +1007,28 @@ def run(
 
     logger.info(f"Fetched {len(all_metrics)} subnet metrics")
 
+    # ─── Subnet identity fetch (feeds both 🆕 and dereg alert enrichment) ────
+    # One taostats API call → {netuid: {name, url, github, discord, description,
+    # contact}} for every subnet. Owners register identity on-chain; taostats
+    # reflects it within minutes. Cached in prev_state so a fetch failure
+    # doesn't lose the enrichment — we fall back to the last-known map.
+    identity_map: dict[int, dict] = {}
+    try:
+        fresh = fetch_subnet_identities(client)
+        if fresh:
+            identity_map = fresh
+            # Persist as {str(nid): fields} — JSON stringifies int keys anyway
+            prev_state["subnet_identities"] = {str(k): v for k, v in fresh.items()}
+            prev_state["subnet_identities_ts"] = time.time()
+        else:
+            cached = prev_state.get("subnet_identities") or {}
+            identity_map = {int(k): v for k, v in cached.items()}
+            logger.info(f"Using cached subnet identities ({len(identity_map)} netuids)")
+    except Exception as e:
+        logger.warning(f"Subnet identity fetch errored ({e}); using cache")
+        cached = prev_state.get("subnet_identities") or {}
+        identity_map = {int(k): v for k, v in cached.items()}
+
     # ─── New-subnet detector ─────────────────────────────────────────────────
     # A subnet appearing at a netuid we haven't seen before means someone just
     # registered (or a previously-deregistered slot was re-registered by a new
@@ -1022,14 +1044,29 @@ def run(
         if known_netuids:
             new_netuids = sorted(current_netuids - known_netuids)
             if new_netuids and telegram_token and telegram_chat:
-                # Build a compact alert — one line per new subnet with name
-                # (may be blank/placeholder on day-zero) + a tao.app link.
+                # Build a rich alert — identity map gives name, url, description,
+                # github. On identity miss, fall back to the on-chain name field
+                # from all_metrics (may be blank/placeholder on day-zero).
                 by_id = {int(m.subnet_id): m for m in all_metrics}
                 lines = ["🆕 NEW SUBNET DETECTED"]
                 for nid in new_netuids[:10]:   # cap in case of a batch
-                    m = by_id.get(nid)
-                    name = (getattr(m, "name", "") or "").strip() or "(unnamed)"
+                    ident = identity_map.get(nid) or {}
+                    name = (ident.get("name") or "").strip()
+                    if not name:
+                        m = by_id.get(nid)
+                        name = (getattr(m, "name", "") or "").strip() or "(unnamed)"
                     lines.append(f"SN{nid} · {name}")
+                    desc = (ident.get("description") or "").strip()
+                    if desc:
+                        # Trim overly long descriptions — Telegram gets ugly
+                        # past ~140 chars per line.
+                        lines.append(f"   {desc[:140]}")
+                    url = (ident.get("url") or "").strip()
+                    if url:
+                        lines.append(f"   🌐 {url}")
+                    gh = (ident.get("github") or "").strip()
+                    if gh:
+                        lines.append(f"   💻 {gh}")
                 lines.append(f"Total: {len(known_netuids)} → {len(current_netuids)}")
                 lines.append(f"Check: https://tao.app/subnets/{new_netuids[0]}")
                 send_telegram("\n".join(lines), telegram_token, telegram_chat)
@@ -1111,8 +1148,15 @@ def run(
                     held_tag = " · HELD" if nid in held_set else ""
                     mp = next((float(m.moving_price) for m in ranked
                                if int(m.subnet_id) == nid), 0.0)
-                    lines.append(f"{icon} SN{nid} · {name} — rank #{rank}"
+                    # Prefer taostats identity name over on-chain (identity is
+                    # refreshed on rename; chain metadata can lag).
+                    ident = identity_map.get(nid) or {}
+                    display_name = (ident.get("name") or "").strip() or name
+                    lines.append(f"{icon} SN{nid} · {display_name} — rank #{rank}"
                                  f" (MA {mp:.4f}τ){held_tag}")
+                    url = (ident.get("url") or "").strip()
+                    if url:
+                        lines.append(f"   🌐 {url}")
                 if burn_cost is not None:
                     if burn_delta is not None and abs(burn_delta) >= 0.01:
                         sign = "+" if burn_delta >= 0 else ""
