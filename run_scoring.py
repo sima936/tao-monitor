@@ -1040,6 +1040,104 @@ def run(
     except Exception as e:
         logger.warning(f"New-subnet detector skipped: {e}")
 
+    # ─── Dereg watchlist detector ────────────────────────────────────────────
+    # Chain rule: when a new subnet registers, the incumbent slot with the
+    # lowest MOVING-AVERAGE price (di.moving_price on-chain EMA) is
+    # deregistered — all alpha is liquidated for TAO at the pool price and
+    # returned as free TAO. So:
+    #   • HELD name in bottom 5 = RISK (you'd force-liquidate at pool price)
+    #   • Any subnet in bottom 3 = OPPORTUNITY window (slot may turn over)
+    # Combined with the burn-cost trend (cheap slot → more likely someone
+    # registers) this gives a rough turnover window even without knowing WHO
+    # will fill the slot.
+    #
+    # Silent on the taostats fallback path (moving_price not exposed there).
+    # 24h rate limit per netuid so a borderline subnet doesn't spam.
+    try:
+        # Rank by moving_price ascending — lowest = #1 dereg candidate. Skip
+        # SN0 (root, exempt) and any subnet missing moving_price.
+        ranked = sorted(
+            (m for m in all_metrics
+             if int(m.subnet_id) != 0
+             and getattr(m, "moving_price", None) is not None
+             and m.moving_price > 0),
+            key=lambda m: float(m.moving_price),
+        )
+        if not ranked:
+            logger.info("Dereg detector skipped: no moving_price data (taostats path?)")
+        else:
+            # Fetch burn cost once per cycle. None-tolerant.
+            try:
+                from chain_fetch import get_subnet_burn_cost_via_chain
+                burn_cost = get_subnet_burn_cost_via_chain()
+            except Exception as _bc_e:
+                logger.warning(f"Burn cost fetch failed: {_bc_e}")
+                burn_cost = None
+            prev_burn = prev_state.get("burn_cost_tao")
+            burn_delta = None
+            if burn_cost is not None and prev_burn is not None:
+                burn_delta = float(burn_cost) - float(prev_burn)
+
+            # Current ranks {netuid: rank_1based}.
+            current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(ranked)}
+            held_set = set(holdings or [])
+            now_ts = time.time()
+            last_alert = prev_state.get("dereg_last_alert_ts") or {}
+            RATE_LIMIT_S = 24 * 3600
+            HELD_RISK_RANK = 5   # held name in bottom 5 → alert
+            OPP_RANK = 3         # any name in bottom 3 → alert
+
+            fires: list[tuple[int, int, str, str]] = []  # (nid, rank, name, kind)
+            for m in ranked[:HELD_RISK_RANK]:
+                nid = int(m.subnet_id)
+                rank = current_ranks[nid]
+                name = (getattr(m, "name", "") or "").strip() or f"SN{nid}"
+                # Rate limit
+                last = float(last_alert.get(str(nid)) or 0.0)
+                if (now_ts - last) < RATE_LIMIT_S:
+                    continue
+                if nid in held_set and rank <= HELD_RISK_RANK:
+                    fires.append((nid, rank, name, "RISK"))
+                elif rank <= OPP_RANK:
+                    fires.append((nid, rank, name, "WATCH"))
+
+            if fires and telegram_token and telegram_chat:
+                # One combined message per cron, ordered RISK first
+                fires.sort(key=lambda t: (0 if t[3] == "RISK" else 1, t[1]))
+                header = "⏳ DEREG WATCHLIST"
+                lines = [header]
+                for nid, rank, name, kind in fires:
+                    icon = "⚠️" if kind == "RISK" else "👀"
+                    held_tag = " · HELD" if nid in held_set else ""
+                    mp = next((float(m.moving_price) for m in ranked
+                               if int(m.subnet_id) == nid), 0.0)
+                    lines.append(f"{icon} SN{nid} · {name} — rank #{rank}"
+                                 f" (MA {mp:.4f}τ){held_tag}")
+                if burn_cost is not None:
+                    if burn_delta is not None and abs(burn_delta) >= 0.01:
+                        sign = "+" if burn_delta >= 0 else ""
+                        lines.append(f"Burn: {burn_cost:.2f}τ  ({sign}{burn_delta:.2f}τ)")
+                    else:
+                        lines.append(f"Burn: {burn_cost:.2f}τ")
+                lines.append(f"tao.app/subnets/{fires[0][0]}")
+                send_telegram("\n".join(lines), telegram_token, telegram_chat)
+                logger.warning(f"DEREG ALERT: {[(n, r, k) for n, r, _, k in fires]}")
+                # Record rate-limit stamps
+                for nid, _, _, _ in fires:
+                    last_alert[str(nid)] = now_ts
+
+            # Persist for next cycle
+            prev_state["dereg_watchlist"] = [
+                {"netuid": int(m.subnet_id), "rank": current_ranks[int(m.subnet_id)],
+                 "moving_price": round(float(m.moving_price), 6)}
+                for m in ranked[:10]
+            ]
+            if burn_cost is not None:
+                prev_state["burn_cost_tao"] = round(float(burn_cost), 4)
+            prev_state["dereg_last_alert_ts"] = last_alert
+    except Exception as e:
+        logger.warning(f"Dereg detector skipped: {e}")
+
     # Apply the disk Gini cache first (Infinity8 path), where available.
     all_metrics = apply_gini_overrides(all_metrics, gini_cache)
 
