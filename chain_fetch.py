@@ -265,10 +265,19 @@ def _dynamicinfos_to_metrics(subnets):
         if isinstance(name, (bytes, bytearray)):
             name = bytes(name).decode("utf-8", "ignore")
         name = (str(name).strip() if name else "") or f"SN{nid}"
+        # moving_price: on-chain EMA the dereg algorithm ranks against.
+        # None on taostats path (not exposed there); populated here so the
+        # dereg watchlist detector can rank without a second chain call.
+        mp = getattr(di, "moving_price", None)
+        try:
+            mp = _as_float(mp) if mp is not None else None
+        except Exception:
+            mp = None
         out.append(SubnetMetrics(
             subnet_id=nid, name=name, token_price=price, pool_depth=depth,
             genie_score=0.5, price_history=hist, timestamps=ts,
             volume_24h=vol, volume_7d=0.0,
+            moving_price=mp,
         ))
     return out
 
@@ -300,6 +309,57 @@ def fetch_all_subnet_metrics_via_chain(network: str = DEFAULT_NETWORK):
         return None
     _diag(f"metrics OK — {len(metrics)} subnets via chain RPC (free)")
     return metrics
+
+
+def get_subnet_burn_cost_via_chain(network: str = DEFAULT_NETWORK) -> float | None:
+    """Network-wide subnet-creation lock cost in TAO. One free chain call.
+
+    This is the cost to REGISTER A NEW SUBNET (not a miner slot). It decays
+    smoothly between registrations and doubles on each new one. When it's
+    dropping through a floor, someone will register — which triggers the
+    dereg cascade on the lowest-moving-price incumbent slot.
+
+    Returns None on any failure so the caller degrades cleanly (dereg watchlist
+    still works without burn-cost context — it's a nice-to-have field, not a
+    gate). Defensive against SDK version drift: the method may be spelled
+    get_subnet_burn_cost / burn_cost / lock_cost depending on version.
+    """
+    try:
+        import bittensor as bt
+    except Exception as e:
+        _diag(f"burn_cost: SDK unavailable ({e})")
+        return None
+    _patch_asi_close_bug()
+    sub = None
+    try:
+        sub = bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS)
+        val = None
+        for method in ("get_subnet_burn_cost", "burn_cost", "get_lock_cost", "lock_cost"):
+            fn = getattr(sub, method, None)
+            if callable(fn):
+                try:
+                    val = fn()
+                    break
+                except Exception:
+                    continue
+        if val is None:
+            _diag("burn_cost: no known SDK method returned a value")
+            _safe_close(sub)
+            return None
+        # Value may be a Balance object (with .tao) or a raw rao int.
+        if hasattr(val, "tao"):
+            out = float(val.tao)
+        elif isinstance(val, (int, float)):
+            out = float(val) / 1e9 if val > 1e6 else float(val)  # rao → tao heuristic
+        else:
+            out = _as_float(val)
+    except Exception as e:
+        _diag(f"burn_cost: CHAIN READ FAILED ({type(e).__name__}: {e})")
+        _safe_close(sub)
+        return None
+    _safe_close(sub)
+    _diag(f"burn_cost OK — {out:.2f}τ")
+    return out
 
 
 if __name__ == "__main__":
