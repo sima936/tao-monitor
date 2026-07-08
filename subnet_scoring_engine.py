@@ -137,6 +137,11 @@ class SubnetMetrics:
     volume_7d:      float = 0.0     # TAO
     pool_history:   list[float] = field(default_factory=list)   # param 5
     volume_history: list[float] = field(default_factory=list)   # param 8
+    moving_price:   float | None = None   # on-chain EMA used by the dereg
+                                          # algorithm. Lowest MA-price is the next
+                                          # slot to die when a new subnet registers.
+                                          # None on the taostats path (not exposed);
+                                          # populated on the chain path.
 
 
 @dataclass
