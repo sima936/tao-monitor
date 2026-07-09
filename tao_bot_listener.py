@@ -293,14 +293,144 @@ def handle_holdings() -> None:
         send(f"🔴 Error checking holdings: {e}")
 
 
+def _format_brief_from_payload(data: dict, netuid: int) -> str:
+    """Render /brief output from the cached cron payload.
+
+    Reads the per-netuid maps that run_scoring embeds in the dashboard payload
+    (metrics_by_netuid, identity_by_netuid, dereg_watchlist, bal/pnl/cost) plus
+    fundamentals.json from disk. Same data path the cron uses — no chain reads
+    on-demand, no scraping. Sub-second to render.
+    """
+    key = str(netuid)
+    metrics = (data.get("metrics_by_netuid") or {}).get(key)
+    identity = (data.get("identity_by_netuid") or {}).get(key) or {}
+
+    if not metrics and not identity:
+        return (f"⚠️ SN{netuid} not found in latest payload.\n"
+                "Either the netuid doesn't exist, or the cron hasn't ingested "
+                "a run since the payload schema expanded — try again after "
+                "the next 6h digest.")
+
+    # Fundamentals verdict (matches /status pattern)
+    verdict, verdict_note = "", ""
+    try:
+        fp = SCRIPT_DIR / "fundamentals.json"
+        if fp.exists():
+            fnd = json.loads(fp.read_text()) or {}
+            rec = ((fnd.get("subnets") or {}).get(key) or {})
+            if isinstance(rec, dict):
+                verdict = str(rec.get("verdict", "")).strip()
+                verdict_note = str(rec.get("note", "") or rec.get("thesis", "")).strip()
+            elif isinstance(rec, str):
+                verdict = rec.strip()
+    except Exception as _fe:
+        logger.debug(f"fundamentals lookup failed: {_fe}")
+
+    # Held state
+    bal = float((data.get("bal_by_netuid") or {}).get(key, 0) or 0)
+    cost = float((data.get("cost_by_netuid") or {}).get(key, 0) or 0)
+    pnl_raw = (data.get("pnl_by_netuid") or {}).get(key)
+    pnl_pct = (float(pnl_raw) * 100.0) if pnl_raw is not None else None
+
+    # Dereg rank
+    dereg_rank = None
+    for entry in (data.get("dereg_watchlist") or []):
+        if int(entry.get("netuid", -1)) == netuid:
+            dereg_rank = int(entry.get("rank"))
+            break
+
+    # Preferred name: identity > metrics > fallback
+    metrics = metrics or {}
+    name = (identity.get("name") or metrics.get("name") or "").strip() or f"SN{netuid}"
+    lines = [f"📋 <b>SN{netuid} · {name}</b>", "━" * 18]
+
+    # Identity block
+    if identity.get("url"):
+        lines.append(f"🌐 {identity['url']}")
+    if identity.get("github"):
+        lines.append(f"💻 {identity['github']}")
+    if identity.get("description"):
+        lines.append(f"   {identity['description'][:140]}")
+    if any(identity.get(k) for k in ("url", "github", "description")):
+        lines.append("")
+
+    # Market data
+    if metrics:
+        price = float(metrics.get("token_price") or 0.0)
+        pool = float(metrics.get("pool_depth") or 0.0)
+        gini = float(metrics.get("gini") or 0.0)
+        ma = metrics.get("moving_price")
+        vol = float(metrics.get("volume_24h") or 0.0)
+        market = f"📊 price {price:.4f}τ · pool {pool:,.0f}τ · gini {gini:.2f}"
+        if ma is not None:
+            market += f" · MA {float(ma):.4f}τ"
+        lines.append(market)
+        if vol > 0:
+            lines.append(f"📈 24h vol: {vol:,.0f}τ")
+
+    # Dereg risk (only surface if in bottom 10)
+    if dereg_rank is not None:
+        icon = "⚠️" if dereg_rank <= 5 else "👀"
+        lines.append(f"📉 Dereg rank: #{dereg_rank} {icon}")
+
+    lines.append("")
+
+    # Held
+    if bal > 0.001:
+        held = f"✅ Held: {bal:.2f}α"
+        if cost > 0:
+            held += f" ({cost:.2f}τ cost"
+            if pnl_pct is not None:
+                held += f", {pnl_pct:+.1f}%"
+            held += ")"
+        lines.append(held)
+    else:
+        lines.append("○ Not held")
+
+    # Verdict
+    if verdict:
+        v_icon = {"KEEP": "✅", "WATCH": "👀", "AVOID": "🚫"}.get(verdict.upper(), "•")
+        v_line = f"{v_icon} Verdict: <b>{verdict}</b>"
+        if verdict_note:
+            v_line += f" — {verdict_note[:100]}"
+        lines.append(v_line)
+
+    lines.append("")
+    lines.append(f"🔗 https://tao.app/subnets/{netuid}")
+    return "\n".join(lines)
+
+
+def handle_brief(arg: str) -> None:
+    """Per-subnet quick facts. Usage: /brief <netuid>"""
+    arg = (arg or "").strip()
+    if not arg:
+        send("Usage: /brief &lt;netuid&gt;  (e.g. /brief 107)")
+        return
+    try:
+        netuid = int(arg.split()[0])
+    except (ValueError, IndexError):
+        send(f"⚠️ '{arg}' is not a valid netuid. Usage: /brief &lt;netuid&gt;")
+        return
+    if netuid < 0 or netuid > 999:
+        send(f"⚠️ SN{netuid} out of range (0-999)")
+        return
+    data = _fetch_latest_score()
+    if not data:
+        send("⚠️ /brief unavailable — dashboard hasn't ingested a scoring run "
+             "yet, or auth env vars are missing. Try /status first.")
+        return
+    send(_format_brief_from_payload(data, netuid))
+
+
 def handle_help() -> None:
     send(
         "🤖 <b>Tao Seeker Commands</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "/status   — run scoring now and send full update\n"
-        "/macro    — show current TAO macro regime\n"
-        "/holdings — show holdings from chain with health scores\n"
-        "/help     — this message\n\n"
+        "/status         — run scoring now and send full update\n"
+        "/macro          — show current TAO macro regime\n"
+        "/holdings       — show holdings from chain with health scores\n"
+        "/brief &lt;netuid&gt; — per-subnet quick facts (e.g. /brief 107)\n"
+        "/help           — this message\n\n"
         "All on-demand — no automated messages."
     )
 
@@ -315,7 +445,7 @@ HANDLERS = {
 
 def process_update(update: dict) -> None:
     message = update.get("message", {})
-    text = message.get("text", "").strip().lower().split("@")[0]  # strip @botname suffix
+    raw = (message.get("text") or "").strip()
     from_id = str(message.get("chat", {}).get("id", ""))
 
     # Only respond to the configured chat
@@ -323,20 +453,41 @@ def process_update(update: dict) -> None:
         logger.info(f"Ignoring message from chat {from_id}")
         return
 
-    if text not in HANDLERS:
+    # Split first token (command) from the rest (args). Strip @botname suffix
+    # from the command specifically — args like "107" must survive intact.
+    # "/brief@TaoBot 107" → cmd="/brief", args="107"
+    parts = raw.split(None, 1)
+    if not parts:
+        return
+    cmd = parts[0].lower().split("@")[0]
+    args = parts[1] if len(parts) > 1 else ""
+
+    # /brief takes an argument — special-case before the exact-match table.
+    if cmd == "/brief":
+        now = time.time()
+        last = _last_command_ts.get(cmd, 0)
+        if now - last < COMMAND_COOLDOWN:
+            logger.info(f"Command '{cmd}' ignored — cooldown active")
+            return
+        _last_command_ts[cmd] = now
+        logger.info(f"Handling command: {cmd} {args}")
+        handle_brief(args)
+        return
+
+    if cmd not in HANDLERS:
         return
 
     # Cooldown to prevent double-triggers — per command, so /macro then /holdings
     # back-to-back doesn't silently drop the second one.
     now = time.time()
-    last = _last_command_ts.get(text, 0)
+    last = _last_command_ts.get(cmd, 0)
     if now - last < COMMAND_COOLDOWN:
-        logger.info(f"Command '{text}' ignored — cooldown active")
+        logger.info(f"Command '{cmd}' ignored — cooldown active")
         return
 
-    _last_command_ts[text] = now
-    logger.info(f"Handling command: {text}")
-    HANDLERS[text]()
+    _last_command_ts[cmd] = now
+    logger.info(f"Handling command: {cmd}")
+    HANDLERS[cmd]()
 
 
 def main() -> None:
