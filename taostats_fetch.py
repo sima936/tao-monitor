@@ -695,9 +695,15 @@ def fetch_subnet_identities(client: TaostatsClient) -> dict[int, dict]:
     doubles as an automatic rotation detector for fundamentals.json — SN15
     ORO, SN40 Ralph, SN58 greevils all show up here as their current identity.
     """
+    import sys as _sys   # local import — keep the helper self-contained
     try:
         resp = client.get("/api/subnet/identity/v1", params={"limit": 200})
     except Exception as e:
+        # Print to stderr as well as logger — bittensor hijacks logger on the
+        # cron service, so [identity] prefix in Railway logs is the only way to
+        # confirm this ran without crashing the digest.
+        print(f"[identity] FETCH FAILED ({type(e).__name__}: {e})",
+              file=_sys.stderr, flush=True)
         logger.warning(f"Subnet identity fetch failed: {e}")
         return {}
     out: dict[int, dict] = {}
@@ -719,6 +725,7 @@ def fetch_subnet_identities(client: TaostatsClient) -> dict[int, dict]:
             "description": _s("description"),
             "contact":     _s("subnet_contact"),
         }
+    print(f"[identity] OK — {len(out)} netuids", file=_sys.stderr, flush=True)
     logger.info(f"Subnet identity fetch OK — {len(out)} netuids")
     return out
 
