@@ -1754,34 +1754,45 @@ def run(
                 logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
 
             # ─── Markov signal shadow-log (k=0, no sizing effect) ────────────
-            # Record per-subnet Markov regime signal each cron for the held
-            # book. Purely informational — does NOT influence allocation
-            # sizing until Simon has ~60d of forward-return data to score IC
-            # and explicitly turns k up. This is the "shadow-log first, wire
-            # in second" discipline the STRATEGY spec calls out.
+            # Record per-subnet Markov regime signal each cron for the full
+            # subnet universe (env-toggle: MARKOV_SHADOW_ALL_SUBNETS=1, default
+            # on). Widening to all subnets dramatically accelerates the IC
+            # dataset: 129 rows/cron instead of ~5. Signal is captured but
+            # does NOT influence allocation sizing until Simon has ~60d of
+            # forward-return data (or hermes_lite's snapshot-history backfill
+            # gives an early read) to score IC and explicitly turn k up.
+            # This is the "shadow-log first, wire in second" discipline the
+            # STRATEGY spec calls out.
             try:
                 from snapshot_history import daily_series_for_netuids
                 from markov_shadow import (
                     compute_markov_signal, append_shadow_log,
                     MIN_HISTORY_POINTS,
                 )
-                _held_ids = [int(h) for h in (holdings or []) if int(h) != 0]
-                _series = daily_series_for_netuids(_held_ids, max_days=120)
+                _shadow_all = os.environ.get("MARKOV_SHADOW_ALL_SUBNETS", "1") != "0"
+                if _shadow_all:
+                    _target_ids = [int(m.subnet_id) for m in all_metrics
+                                   if int(m.subnet_id) != 0]
+                else:
+                    _target_ids = [int(h) for h in (holdings or []) if int(h) != 0]
+                _series = daily_series_for_netuids(_target_ids, max_days=120)
                 _metrics_by_id = {int(m.subnet_id): m for m in all_metrics}
                 _shadow_rows = []
-                _skipped = []
-                for _nid in _held_ids:
+                _skipped_short = 0
+                _skipped_no_series = 0
+                _skipped_no_signal = 0
+                for _nid in _target_ids:
                     _closes_stamps = _series.get(_nid)
                     if not _closes_stamps:
-                        _skipped.append((_nid, "no series"))
+                        _skipped_no_series += 1
                         continue
                     _closes, _stamps = _closes_stamps
                     if len(_closes) < MIN_HISTORY_POINTS:
-                        _skipped.append((_nid, f"only {len(_closes)}d"))
+                        _skipped_short += 1
                         continue
                     _sig = compute_markov_signal(_closes)
                     if _sig is None:
-                        _skipped.append((_nid, "no signal"))
+                        _skipped_no_signal += 1
                         continue
                     _m = _metrics_by_id.get(_nid)
                     _name = ((_m.name if _m else None) or "").strip() or f"SN{_nid}"
@@ -1797,14 +1808,25 @@ def run(
                     })
                 if _shadow_rows:
                     append_shadow_log(_shadow_rows)
-                    _diag("markov_shadow", "logged " + ", ".join(
+                    # Show a small sample in the diag; full detail in the CSV
+                    _held = set(int(h) for h in (holdings or []))
+                    _sample = [r for r in _shadow_rows if r["netuid"] in _held][:5]
+                    _sample_str = ", ".join(
                         f"SN{r['netuid']}({r['current_regime'][:1]},{r['signal']:+.3f})"
-                        for r in _shadow_rows))
-                if _skipped:
-                    _diag("markov_shadow", "skipped " + ", ".join(
-                        f"SN{n}({r})" for n, r in _skipped))
-                if not _shadow_rows and not _skipped:
-                    _diag("markov_shadow", "quiet — no held positions to log")
+                        for r in _sample
+                    )
+                    _diag("markov_shadow",
+                          f"logged {len(_shadow_rows)} signals "
+                          f"(held sample: {_sample_str}) · "
+                          f"skipped: {_skipped_short} short, "
+                          f"{_skipped_no_series} no-series, "
+                          f"{_skipped_no_signal} no-signal")
+                else:
+                    _diag("markov_shadow",
+                          f"quiet — no signals produced "
+                          f"({_skipped_short} short, "
+                          f"{_skipped_no_series} no-series, "
+                          f"{_skipped_no_signal} no-signal)")
             except Exception as _me:
                 _diag("markov_shadow", f"SKIPPED ({type(_me).__name__}: {_me})")
                 logger.warning(f"Markov shadow-log block skipped: {_me}")
