@@ -1214,6 +1214,11 @@ def run(
             ]
             if burn_cost is not None:
                 prev_state["burn_cost_tao"] = round(float(burn_cost), 4)
+                # Delta from last cron — used by the digest footer to show
+                # cascade proximity (falling burn = registration imminent).
+                # None on first-ever cron; then always populated.
+                if burn_delta is not None:
+                    prev_state["burn_cost_delta_tao"] = round(float(burn_delta), 4)
             prev_state["dereg_last_alert_ts"] = last_alert
     except Exception as e:
         _diag("dereg", f"SKIPPED ({type(e).__name__}: {e})")
@@ -1676,6 +1681,22 @@ def run(
         macro_header = format_macro_header(macro)
         msg = format_telegram_alert(result, current_holdings=holdings,
                                     macro_header=macro_header, pnl_by_netuid=pnl_by_netuid)
+
+    # Burn-cost footer (Part D): cost to register a new subnet. Decays smoothly
+    # between registrations, doubles on each new one. Falling burn = registration
+    # window opening = dereg cascade nearer. Rendered above the store footer so
+    # it sits next to the "raw operational" data. Silent if burn_cost isn't
+    # available this cron (chain read failed / SDK method probe returned None).
+    try:
+        _bc = prev_state.get("burn_cost_tao")
+        _bd = prev_state.get("burn_cost_delta_tao")
+        if _bc is not None:
+            _delta_str = ""
+            if _bd is not None and abs(float(_bd)) >= 0.01:
+                _delta_str = f" ({float(_bd):+.2f}τ)"
+            msg += f"\n\U0001F525 burn: {float(_bc):.2f}\u03c4{_delta_str}"
+    except Exception as _be:
+        logger.debug(f"burn footer skipped: {_be}")
 
     # Store-health footer (tiny): watch the snapshot store fill from Telegram
     # without a console on the cron. Guarded — never blocks or breaks the digest.
