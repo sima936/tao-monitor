@@ -1043,6 +1043,73 @@ def run(
         cached = prev_state.get("subnet_identities") or {}
         identity_map = {int(k): v for k, v in cached.items()}
 
+    # ─── Rotation-aware fundamentals check ───────────────────────────────────
+    # identity_map is the authoritative source of subnet names — owners set
+    # identity on-chain via extrinsic; taostats reflects it within minutes.
+    # Compare each fundamentals.json entry against the current identity and
+    # fire an alert on substantive name mismatch. Simon updates fundamentals
+    # by hand; this block never writes to the file — verdict transfer across
+    # a rotation (e.g. DRAIN → greevils) is a human judgement.
+    #
+    # Rate limit: don't re-alert until the on-chain name changes AGAIN
+    # (persist last-alerted-name per netuid). Deferred action doesn't nag;
+    # a second rotation does re-fire.
+    try:
+        _fnd_path = Path(__file__).parent / "fundamentals.json"
+        if _fnd_path.exists() and identity_map:
+            _fnd = (json.loads(_fnd_path.read_text()) or {}).get("subnets", {}) or {}
+            _alerted = dict(prev_state.get("rotation_alerted") or {})
+
+            def _norm_name(s: str) -> str:
+                """Case/whitespace/punctuation-insensitive comparison key."""
+                return "".join(c.lower() for c in (s or "") if c.isalnum())
+
+            _rotations = []
+            for _nid_str, _rec in _fnd.items():
+                try:
+                    _nid = int(_nid_str)
+                except (TypeError, ValueError):
+                    continue
+                _fnd_name = str((_rec or {}).get("name", "")).strip()
+                _ident = identity_map.get(_nid) or {}
+                _live_name = str(_ident.get("name", "")).strip()
+                if not _fnd_name or not _live_name:
+                    continue  # can't compare — skip
+                if _norm_name(_live_name) == _norm_name(_fnd_name):
+                    continue  # only case/punctuation differs — not a rotation
+                # Substantive mismatch. Alert once per live_name change.
+                if _alerted.get(_nid_str) == _live_name:
+                    continue
+                _rotations.append({
+                    "netuid":    _nid,
+                    "fnd_name":  _fnd_name,
+                    "live_name": _live_name,
+                    "verdict":   str((_rec or {}).get("verdict", "")).strip(),
+                })
+
+            if _rotations:
+                _lines = [f"🔄 ROTATION DETECTED ({len(_rotations)})", ""]
+                for _r in _rotations:
+                    _v = _r["verdict"] or "(none)"
+                    _lines.append(f"SN{_r['netuid']}: {_r['fnd_name']} → {_r['live_name']}")
+                    _lines.append(f"  Verdict on file: {_v}")
+                    _lines.append(f"  https://tao.app/subnets/{_r['netuid']}")
+                    _lines.append("")
+                _lines.append("Update fundamentals.json name (+ re-verdict if needed).")
+                if telegram_token and telegram_chat:
+                    send_telegram("\n".join(_lines), telegram_token, telegram_chat)
+                _diag("rotation", f"detected {len(_rotations)}: "
+                      f"{[(r['netuid'], r['fnd_name'], r['live_name']) for r in _rotations]}")
+                logger.warning(f"ROTATIONS DETECTED: {[r['netuid'] for r in _rotations]}")
+                for _r in _rotations:
+                    _alerted[str(_r["netuid"])] = _r["live_name"]
+            else:
+                _diag("rotation", f"quiet — {len(_fnd)} fundamentals names match live identity")
+            prev_state["rotation_alerted"] = _alerted
+    except Exception as e:
+        _diag("rotation", f"SKIPPED ({type(e).__name__}: {e})")
+        logger.warning(f"Rotation check skipped: {e}")
+
     # ─── New-subnet detector ─────────────────────────────────────────────────
     # A subnet appearing at a netuid we haven't seen before means someone just
     # registered (or a previously-deregistered slot was re-registered by a new
