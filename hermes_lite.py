@@ -65,14 +65,23 @@ def _minimal_yaml_parse(src: str) -> dict:
 
 # ── Snapshot store adapter — read historical closes for fwd_return backfill ─
 def load_snapshot_series(
-    db_path: Path = Path("/data/snapshots.db"),
+    db_path: Path | None = None,
     max_days: int = 120,
 ) -> dict[int, pd.DataFrame]:
     """Return {netuid: DataFrame(ts, price)} — all snapshots for the window.
 
-    Uses snapshot_history.daily_series_for_netuids under the hood if
-    available; falls back to a direct sqlite read if not (portable to
-    a machine without the full stack)."""
+    Uses snapshot_history's own path convention (SNAPSHOT_DB_PATH env var,
+    falls back to sibling snapshot_history.db) so hermes_lite reads exactly
+    what the cron writes. No path drift.
+
+    Falls back to a direct sqlite read if snapshot_history can't be imported.
+    """
+    if db_path is None:
+        try:
+            from snapshot_history import SNAPSHOT_DB_PATH
+            db_path = SNAPSHOT_DB_PATH
+        except ImportError:
+            db_path = Path("/data/snapshot_history.db")
     try:
         # Prefer the project's own reader (it handles the schema authoritatively)
         from snapshot_history import daily_series_for_netuids, _connect
@@ -88,14 +97,17 @@ def load_snapshot_series(
         }
     except Exception:
         import sqlite3
-        conn = sqlite3.connect(str(db_path))
-        cutoff = int(time.time()) - max_days * 86400
-        rows = conn.execute(
-            "SELECT netuid, ts, price FROM snapshots "
-            "WHERE ts >= ? AND price > 0 ORDER BY netuid, ts ASC",
-            (cutoff,),
-        ).fetchall()
-        conn.close()
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cutoff = int(time.time()) - max_days * 86400
+            rows = conn.execute(
+                "SELECT netuid, ts, price FROM snapshots "
+                "WHERE ts >= ? AND price > 0 ORDER BY netuid, ts ASC",
+                (cutoff,),
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return {}
         out: dict[int, pd.DataFrame] = {}
         for nid, ts, price in rows:
             df = out.setdefault(int(nid), pd.DataFrame({"ts": [], "price": []}))
@@ -394,16 +406,33 @@ def run_full_report(
     cron; embedded in the dashboard payload for the /hermes Telegram command
     to render.
 
+    Path resolution: pulls MARKOV_SHADOW_LOG_PATH and OUTCOME_LOG_PATH from
+    the source modules (markov_shadow / tp_cl_stops) so we ALWAYS read from
+    the exact file the writers write to — no path drift between components.
+
     Side-effect: writes fwd_return backfill to the CSV logs on disk. Safe to
     call every cron because backfill only fills BLANK cells (never overwrites).
     """
-    here = Path(__file__).parent
-    outcome_log = outcome_log_path or Path(
-        os.environ.get("OUTCOME_LOG_PATH", here / "outcome_log.csv")
-    )
-    shadow_log = shadow_log_path or Path(
-        os.environ.get("MARKOV_SHADOW_LOG_PATH", here / "markov_shadow_log.csv")
-    )
+    if outcome_log_path is None:
+        try:
+            from tp_cl_stops import OUTCOME_LOG_PATH as _op
+            outcome_log_path = _op
+        except ImportError:
+            outcome_log_path = Path(os.environ.get(
+                "OUTCOME_LOG_PATH",
+                str(Path(__file__).parent / "outcome_log.csv"),
+            ))
+    if shadow_log_path is None:
+        try:
+            from markov_shadow import MARKOV_SHADOW_LOG_PATH as _sp
+            shadow_log_path = _sp
+        except ImportError:
+            shadow_log_path = Path(os.environ.get(
+                "MARKOV_SHADOW_LOG_PATH",
+                str(Path(__file__).parent / "markov_shadow_log.csv"),
+            ))
+    outcome_log = outcome_log_path
+    shadow_log = shadow_log_path
 
     report: dict = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
