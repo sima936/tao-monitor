@@ -422,6 +422,114 @@ def handle_brief(arg: str) -> None:
     send(_format_brief_from_payload(data, netuid))
 
 
+def _format_hermes_report(r: dict) -> str:
+    """Render hermes_lite calibration report for Telegram.
+
+    Report shape produced by hermes_lite.run_full_report():
+      generated_at, snapshot_span_days, snapshot_netuids,
+      fwd_returns_filled: {shadow, outcome},
+      stability: [{param, jitter, n_events, pct_changed_low/high}, ...],
+      ic: {per_horizon: {h: {n, pooled_ic, ic_stability_iqr, per_subnet}}},
+      verdict: {status, message, effective_ic_7d?, pooled_ic_7d?, horizon_caveat?}
+    """
+    lines = ["🧪 <b>HERMES LITE — calibration report</b>", "━" * 20]
+
+    # Store span + backfill counts
+    span = r.get("snapshot_span_days")
+    n_uids = r.get("snapshot_netuids") or 0
+    if span is not None:
+        lines.append(f"📈 store: {n_uids} netuids · {span}d span")
+    filled = r.get("fwd_returns_filled") or {}
+    lines.append(f"🔄 backfilled: {filled.get('shadow', 0)} shadow · "
+                 f"{filled.get('outcome', 0)} outcome")
+    lines.append("")
+
+    # Perturbation-stability
+    lines.append("<b>Stops — perturbation stability:</b>")
+    for s in (r.get("stability") or []):
+        param = s.get("param", "?")
+        if "error" in s:
+            lines.append(f"  {param}: {s['error']}")
+            continue
+        lo = float(s.get("pct_changed_low", 0)) * 100
+        hi = float(s.get("pct_changed_high", 0)) * 100
+        n = int(s.get("n_events", 0))
+        max_churn = max(lo, hi)
+        if max_churn < 5:
+            tag = "⚪ noise"
+        elif max_churn > 40:
+            tag = "🔴 chaotic"
+        else:
+            tag = "🟡 meaningful"
+        j = s.get("jitter", 0)
+        lines.append(f"  {param} ±{j}: −{lo:.0f}% / +{hi:.0f}% "
+                     f"({n} events) {tag}")
+    lines.append("")
+
+    # IC per horizon
+    lines.append("<b>Markov signal IC:</b>")
+    per_h = (r.get("ic", {}) or {}).get("per_horizon", {}) or {}
+    if not per_h:
+        lines.append("  no scoring data yet")
+    else:
+        for h_str in sorted(per_h.keys(), key=lambda x: int(x)):
+            block = per_h[h_str]
+            n = int(block.get("n", 0))
+            pooled = block.get("pooled_ic")
+            stab = block.get("ic_stability_iqr")
+            p_str = f"{pooled:+.3f}" if pooled is not None else "n/a"
+            s_str = f"IQR {stab:.3f}" if stab is not None else "IQR n/a"
+            lines.append(f"  {h_str}d: n={n} · pooled {p_str} · {s_str}")
+    lines.append("")
+
+    # Verdict
+    v = r.get("verdict") or {}
+    status = v.get("status", "unknown")
+    icon = {
+        "candidate_positive": "🟢",
+        "anti_predictive":    "🔴",
+        "not_significant":    "⚪",
+        "insufficient_data":  "⏳",
+    }.get(status, "•")
+    lines.append(f"<b>Verdict:</b> {icon}")
+    lines.append(f"  {v.get('message', '(none)')}")
+    eff = v.get("effective_ic_7d")
+    pooled_7 = v.get("pooled_ic_7d")
+    if eff is not None:
+        lines.append(f"  effective IC (7d): {eff:+.3f}  "
+                     f"(pooled {pooled_7:+.3f})" if pooled_7 is not None
+                     else f"  effective IC (7d): {eff:+.3f}")
+    caveat = v.get("horizon_caveat")
+    if caveat:
+        lines.append(f"  ⚠️ {caveat}")
+
+    ts = str(r.get("generated_at", ""))[:19]
+    if ts:
+        lines.append(f"\n<i>generated: {ts} UTC</i>")
+    return "\n".join(lines)
+
+
+def handle_hermes() -> None:
+    """/hermes — read last hermes_lite calibration report from dashboard payload."""
+    data = _fetch_latest_score()
+    if not data:
+        send("⚠️ /hermes unavailable — dashboard hasn't ingested a scoring run "
+             "yet, or auth env vars are missing. Try /status first.")
+        return
+    report = data.get("hermes_report")
+    if not report:
+        send("⚠️ /hermes: no calibration report in latest payload.\n"
+             "Cron may not have run hermes_lite yet — try again after the "
+             "next cron cycle.")
+        return
+    try:
+        msg = _format_hermes_report(report)
+    except Exception as e:
+        logger.warning(f"hermes report format failed: {e}")
+        msg = f"⚠️ /hermes: failed to format report ({type(e).__name__}: {e})"
+    send(msg)
+
+
 def handle_help() -> None:
     send(
         "🤖 <b>Tao Seeker Commands</b>\n"
@@ -430,6 +538,7 @@ def handle_help() -> None:
         "/macro          — show current TAO macro regime\n"
         "/holdings       — show holdings from chain with health scores\n"
         "/brief &lt;netuid&gt; — per-subnet quick facts (e.g. /brief 107)\n"
+        "/hermes         — calibration report (IC, stability, verdict)\n"
         "/help           — this message\n\n"
         "All on-demand — no automated messages."
     )
@@ -439,6 +548,7 @@ HANDLERS = {
     "/status":   handle_status,
     "/macro":    handle_macro,
     "/holdings": handle_holdings,
+    "/hermes":   handle_hermes,
     "/help":     handle_help,
 }
 
