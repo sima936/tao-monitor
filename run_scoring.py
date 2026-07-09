@@ -75,6 +75,13 @@ from geckoterminal_fetch import fetch_history_for_netuids
 
 logger = logging.getLogger("tao_scoring_runner")
 
+
+def _diag(tag: str, msg: str) -> None:
+    """Print to stderr with a bracket tag so bittensor's logger hijack can't
+    swallow it (mirrors chain_fetch._diag). Used for the new detector blocks
+    where `logger.info/warning` output is otherwise invisible on Railway."""
+    print(f"[{tag}] {msg}", file=sys.stderr, flush=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1028,8 +1035,10 @@ def run(
         else:
             cached = prev_state.get("subnet_identities") or {}
             identity_map = {int(k): v for k, v in cached.items()}
+            _diag("identity", f"using cache ({len(identity_map)} netuids)")
             logger.info(f"Using cached subnet identities ({len(identity_map)} netuids)")
     except Exception as e:
+        _diag("identity", f"ERRORED ({type(e).__name__}: {e}) — using cache")
         logger.warning(f"Subnet identity fetch errored ({e}); using cache")
         cached = prev_state.get("subnet_identities") or {}
         identity_map = {int(k): v for k, v in cached.items()}
@@ -1116,6 +1125,7 @@ def run(
             key=lambda m: float(m.moving_price),
         )
         if not ranked:
+            _diag("dereg", "skipped — no moving_price data (taostats path?)")
             logger.info("Dereg detector skipped: no moving_price data (taostats path?)")
         else:
             # Fetch burn cost once per cycle. None-tolerant.
@@ -1123,6 +1133,7 @@ def run(
                 from chain_fetch import get_subnet_burn_cost_via_chain
                 burn_cost = get_subnet_burn_cost_via_chain()
             except Exception as _bc_e:
+                _diag("dereg", f"burn_cost fetch failed: {_bc_e}")
                 logger.warning(f"Burn cost fetch failed: {_bc_e}")
                 burn_cost = None
             prev_burn = prev_state.get("burn_cost_tao")
@@ -1180,10 +1191,20 @@ def run(
                         lines.append(f"Burn: {burn_cost:.2f}τ")
                 lines.append(f"tao.app/subnets/{fires[0][0]}")
                 send_telegram("\n".join(lines), telegram_token, telegram_chat)
+                _diag("dereg", f"alert fired ({len(fires)} subnets): "
+                      f"{[(n, r, k) for n, r, _, k in fires]}")
                 logger.warning(f"DEREG ALERT: {[(n, r, k) for n, r, _, k in fires]}")
                 # Record rate-limit stamps
                 for nid, _, _, _ in fires:
                     last_alert[str(nid)] = now_ts
+            else:
+                # Silent-but-observable: show ranked state each cron so we can
+                # tell watchlist is running even when nothing fires.
+                bottom3 = [(int(m.subnet_id), float(m.moving_price)) for m in ranked[:3]]
+                if burn_cost is not None:
+                    _diag("dereg", f"quiet — bottom3: {bottom3} · burn={burn_cost:.2f}τ")
+                else:
+                    _diag("dereg", f"quiet — bottom3: {bottom3}")
 
             # Persist for next cycle
             prev_state["dereg_watchlist"] = [
@@ -1195,6 +1216,7 @@ def run(
                 prev_state["burn_cost_tao"] = round(float(burn_cost), 4)
             prev_state["dereg_last_alert_ts"] = last_alert
     except Exception as e:
+        _diag("dereg", f"SKIPPED ({type(e).__name__}: {e})")
         logger.warning(f"Dereg detector skipped: {e}")
 
     # Apply the disk Gini cache first (Infinity8 path), where available.
@@ -1463,16 +1485,22 @@ def run(
             if entry_events:
                 append_outcome_log(entry_events)
                 scouts = [e for e in entry_events if e.get("is_launch_scout")]
-                logger.info("ENTRIES: " + " | ".join(
-                    f"SN{e['netuid']}"
-                    f"{'*SCOUT' if e.get('is_launch_scout') else ''}"
-                    for e in entry_events))
+                summary = " ".join(
+                    f"SN{e['netuid']}{'*SCOUT' if e.get('is_launch_scout') else ''}"
+                    for e in entry_events)
+                _diag("tp_cl", f"ENTRIES ({len(entry_events)}): {summary}")
+                logger.info("ENTRIES: " + summary)
                 if scouts:
+                    _diag("tp_cl", f"LAUNCH_SCOUT flagged: "
+                          f"{[e['netuid'] for e in scouts]}")
                     logger.warning(
                         f"LAUNCH_SCOUT flagged: {[e['netuid'] for e in scouts]}"
                     )
             if tp_events:
                 append_outcome_log(tp_events)
+                _diag("tp_cl", f"TP_TRIM fired: " + " | ".join(
+                    f"SN{e['netuid']} rung {e.get('trim_rung_pct')}%"
+                    for e in tp_events))
                 logger.warning("TP_TRIM FIRED: " + " | ".join(
                     f"SN{e['netuid']} rung {e.get('trim_rung_pct')}%"
                     for e in tp_events))
@@ -1481,7 +1509,20 @@ def run(
                         format_tp_trim_alert(tp_events),
                         telegram_token, telegram_chat,
                     )
+            # Silent-but-observable heartbeat when nothing fires this cycle.
+            if not entry_events and not tp_events:
+                n_held = sum(
+                    1 for k in entries_out
+                    if int(k) != 0
+                )
+                n_scouts = sum(
+                    1 for v in entries_out.values()
+                    if v.get("launch_scout")
+                )
+                _diag("tp_cl", f"quiet — tracking {n_held} positions "
+                      f"({n_scouts} launch_scout)")
         except Exception as e:
+            _diag("tp_cl", f"SKIPPED ({type(e).__name__}: {e})")
             logger.warning(f"LAUNCH_SCOUT / TP_TRIM block skipped: {e}")
 
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
