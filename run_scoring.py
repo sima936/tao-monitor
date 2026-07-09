@@ -1753,6 +1753,62 @@ def run(
             except Exception as he:
                 logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
 
+            # ─── Markov signal shadow-log (k=0, no sizing effect) ────────────
+            # Record per-subnet Markov regime signal each cron for the held
+            # book. Purely informational — does NOT influence allocation
+            # sizing until Simon has ~60d of forward-return data to score IC
+            # and explicitly turns k up. This is the "shadow-log first, wire
+            # in second" discipline the STRATEGY spec calls out.
+            try:
+                from snapshot_history import daily_series_for_netuids
+                from markov_shadow import (
+                    compute_markov_signal, append_shadow_log,
+                    MIN_HISTORY_POINTS,
+                )
+                _held_ids = [int(h) for h in (holdings or []) if int(h) != 0]
+                _series = daily_series_for_netuids(_held_ids, max_days=120)
+                _metrics_by_id = {int(m.subnet_id): m for m in all_metrics}
+                _shadow_rows = []
+                _skipped = []
+                for _nid in _held_ids:
+                    _closes_stamps = _series.get(_nid)
+                    if not _closes_stamps:
+                        _skipped.append((_nid, "no series"))
+                        continue
+                    _closes, _stamps = _closes_stamps
+                    if len(_closes) < MIN_HISTORY_POINTS:
+                        _skipped.append((_nid, f"only {len(_closes)}d"))
+                        continue
+                    _sig = compute_markov_signal(_closes)
+                    if _sig is None:
+                        _skipped.append((_nid, "no signal"))
+                        continue
+                    _m = _metrics_by_id.get(_nid)
+                    _name = ((_m.name if _m else None) or "").strip() or f"SN{_nid}"
+                    _shadow_rows.append({
+                        "event_ts": round(time.time(), 0),
+                        "netuid":   _nid,
+                        "name":     _name,
+                        "price_now": round(float(_m.token_price), 8) if _m else "",
+                        **_sig,
+                        "fwd_return_1d": "",
+                        "fwd_return_7d": "",
+                        "fwd_return_14d": "",
+                    })
+                if _shadow_rows:
+                    append_shadow_log(_shadow_rows)
+                    _diag("markov_shadow", "logged " + ", ".join(
+                        f"SN{r['netuid']}({r['current_regime'][:1]},{r['signal']:+.3f})"
+                        for r in _shadow_rows))
+                if _skipped:
+                    _diag("markov_shadow", "skipped " + ", ".join(
+                        f"SN{n}({r})" for n, r in _skipped))
+                if not _shadow_rows and not _skipped:
+                    _diag("markov_shadow", "quiet — no held positions to log")
+            except Exception as _me:
+                _diag("markov_shadow", f"SKIPPED ({type(_me).__name__}: {_me})")
+                logger.warning(f"Markov shadow-log block skipped: {_me}")
+
             # Store-only momentum. The taostats overlay (fetch_pool_overlay) is
             # removed: credits are exhausted and the snapshot store already
             # carries 1h/24h/7d/30d for free as it accumulates. Fear & Greed was
