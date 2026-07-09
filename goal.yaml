@@ -1,0 +1,200 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# goal.yaml — Hermes calibration surface for TAO Monitor
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Declarative statement of what Hermes (and hermes_lite) are allowed to
+# calibrate, the objective it's optimising, and the guardrails.
+#
+# Discipline (from STRATEGY_take_profit_cut_loss.md):
+#   • Structure is FIXED (not tunable). What Claude built is scaffolding;
+#     Hermes doesn't get to re-plumb it.
+#   • Only the narrow surface below is tunable. No joint fit of everything.
+#   • Perturbation-stability FIRST (step 2). If a param's optimum is
+#     unstable to ±X jitter, precision on it is second-order.
+#   • Forward-predictive scoring (IC × IC-stability) drives reweighting.
+#     Not intuition, not backtest Sharpe.
+#   • ~60d of live forward data before trusting Hermes on live sizing.
+#     hermes_lite lets us bootstrap on snapshot_history NOW without waiting.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: 1
+last_reviewed: "2026-07-09"
+
+# ── Objective ───────────────────────────────────────────────────────────
+objective:
+  # Compound the TAO stack. Not USD, not alpha count — TAO.
+  primary: "maximise_tao_growth"
+  # Secondary: keep drawdowns bounded. A losing streak that halves the
+  # book is unacceptable even if it eventually recovers.
+  secondary: "bound_max_drawdown"
+  # Score to optimise against. Options: sharpe, sortino, calmar, custom.
+  # Calmar (return / max_dd) matches "compound & survive" better than
+  # Sharpe for a book that's ~34τ — vol tolerance is asymmetric down here.
+  score: "calmar"
+  # Minimum acceptable annualised return before the strategy is worth
+  # running at all (opportunity cost of just holding root).
+  hurdle_rate_annual: 0.15   # 15% — root APY is ~8-12%, so this is the bar
+
+# ── Tunable parameters (the ONLY surface Hermes touches) ────────────────
+tunables:
+
+  # ─ Stops (tp_cl_stops.py env vars) ─
+  TRAIL_PCT:
+    current: 0.25
+    range: [0.15, 0.40]
+    jitter: 0.03           # perturbation-stability probe amplitude
+    description: "Trailing stop distance off peak value"
+
+  STOP_PCT:
+    current: 0.30
+    range: [0.20, 0.50]
+    jitter: 0.05
+    description: "Hard stop off cost basis"
+
+  # ─ Launch scout ladder (tp_cl_stops.py) ─
+  LAUNCH_SCOUT_MAX_ENTRY_TAO:
+    current: 1.0
+    range: [0.5, 3.0]
+    jitter: 0.25
+    description: "Max entry size τ to qualify as a launch scout"
+
+  LAUNCH_SCOUT_WINDOW_DAYS:
+    current: 7
+    range: [3, 14]
+    jitter: 1
+    description: "Days since subnet first-seen for scout eligibility"
+
+  TP_TRIM_FRACTION:
+    current: 0.25
+    range: [0.15, 0.40]
+    jitter: 0.05
+    description: "Fraction of position trimmed per TP rung"
+
+  # TP ladder rungs — list, not scalar. Perturb each independently.
+  TP_TRIM_LADDER:
+    current: [50.0, 100.0]
+    range_per_rung: [25.0, 200.0]
+    jitter_per_rung: 10.0
+    description: "P&L% thresholds that trigger a trim"
+
+  # ─ Regime dial (subnet_allocation.py) ─
+  deploy_signal_hi:
+    current: 0.00           # ← hot per LS34 — no hysteresis, whipsaws
+    range: [0.05, 0.30]     # anything above 0 introduces hysteresis
+    jitter: 0.02
+    description: "Signal above which deploy fraction moves toward 100%. Must be > deploy_signal_lo."
+
+  deploy_signal_lo:
+    current: -0.30
+    range: [-0.50, -0.10]
+    jitter: 0.05
+    description: "Signal below which deploy fraction moves toward 0%."
+
+  bear_deploy_cap:
+    current: 0.50
+    range: [0.30, 0.80]
+    jitter: 0.05
+    description: "Max deploy fraction during Bear regime"
+
+  confirm_hours:
+    current: 18
+    range: [6, 48]
+    jitter: 3
+    description: "Hours a signal must persist before regime exit fires"
+
+  # ─ Markov size-tilt (currently k=0, this is the dial to turn up) ─
+  markov_size_tilt_k:
+    current: 0.0            # ← LOCKED at 0 until IC evidence justifies raising
+    range: [0.0, 1.0]
+    jitter: 0.10
+    description: |
+      Multiplier on per-subnet Markov signal for position sizing.
+      k=0 → shadow-log only (current). k=1 → full effect (signal × conviction).
+      MUST NOT be dialled up until pooled IC on forward returns > 0.05 with
+      stability across window ∈ [8, 12, 15, 20].
+
+# ── Structural (NOT tunable) ────────────────────────────────────────────
+# Everything below is scaffolding. Hermes does not touch. Changes go
+# through Simon + Claude, not through the optimiser.
+locked:
+  - "3-state Markov (Bull/Sideways/Bear) — not more, not fewer"
+  - "Trailing-stop-then-hard-stop precedence"
+  - "Regime exit uses confirm_hours gate; stops bypass it"
+  - "SN0 root exempt from all stops"
+  - "Advisory-only execution (no wallet keys in stack)"
+  - "Cost basis: taostats first, cache second, augment third"
+  - "AVOID and WATCH both cap ADDs (structural, per LS34)"
+  - "Fundamentals verdict transfer across rotation is human-only"
+
+# ── Data sources ────────────────────────────────────────────────────────
+data:
+  outcome_log:
+    path: "./outcome_log.csv"
+    fields_of_interest:
+      - "event_type"        # TRAIL_STOP | HARD_STOP | REGIME_EXIT | TP_TRIM | ENTRY
+      - "pnl_pct"
+      - "fwd_return_1d"
+      - "fwd_return_7d"
+      - "fwd_return_14d"
+      - "regime_at_event"
+      - "trail_pct_used"
+      - "stop_pct_used"
+      - "is_launch_scout"
+
+  markov_shadow_log:
+    path: "./markov_shadow_log.csv"
+    fields_of_interest:
+      - "signal"
+      - "current_regime"
+      - "bull_prob"
+      - "bear_prob"
+      - "fwd_return_1d"
+      - "fwd_return_7d"
+      - "fwd_return_14d"
+
+  snapshot_history:
+    path: "/data/snapshots.db"
+    role: "backfill fwd_returns; hermes_lite bootstrap source"
+
+# ── Perturbation-stability protocol (step 2 of STRATEGY) ────────────────
+stability:
+  # For each tunable, jitter ±jitter, re-run outcome computation, measure
+  # what fraction of exits change.
+  churn_metric: "exit_events_changed_pct"
+  # If jittering a param changes < churn_threshold_low of exits, that
+  # param's precision is second-order — don't over-tune. Report and skip.
+  churn_threshold_low: 0.05    # 5%
+  # If jittering changes > churn_threshold_high, param is over-sensitive
+  # and any optimum is likely overfit. Flag for structural review.
+  churn_threshold_high: 0.40   # 40%
+  # Sweet spot: 5-40% churn — meaningful but not chaotic.
+
+# ── IC scoring protocol (step 3) ───────────────────────────────────────
+ic:
+  # Compute information coefficient on each signal at each horizon.
+  horizons: [1, 7, 14]         # days
+  # IC = spearman(signal, fwd_return) — rank correlation, robust to
+  # signal-magnitude quirks and outlier fwd returns.
+  method: "spearman"
+  # Minimum |IC| to consider a signal predictive. Below this it's noise.
+  significance_threshold: 0.05
+  # IC-stability: how much |IC| varies when you re-slice the data by
+  # subnet subset / time window / signal window. High variance in |IC|
+  # = signal quality is regime-dependent, unreliable to size on.
+  stability_metric: "iqr_of_ic_over_slices"
+  # Only reweight a signal if IC × (1 - IC_stability) > this. Prevents
+  # sizing up on a signal that "worked lately".
+  effective_ic_threshold: 0.03
+
+# ── Guardrails (Hermes cannot violate these) ───────────────────────────
+guardrails:
+  # Never propose a config that would have blown through this drawdown
+  # on the backtest window. Kill-switch for optimiser runaway.
+  max_backtest_drawdown: 0.50
+  # Total round-trips per week on the backtest — if a config trades this
+  # much, fees + slippage eat the edge. Cap.
+  max_weekly_turnover: 4.0
+  # If two configs are within N% of each other on score, prefer the one
+  # closer to the current setting. Least-surprise principle.
+  hysteresis_pct: 0.05
