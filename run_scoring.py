@@ -1566,6 +1566,43 @@ def run(
         _payload["root_tao"] = (
             bal_by_netuid.get(0, 0.0) if bal_by_netuid else None
         )
+        # Per-netuid maps for /brief — bot listener reads these directly from
+        # the cached payload instead of doing its own chain reads. Keeps
+        # /brief as fast as /status, both cache-served. Modest payload growth
+        # (~60KB across 129 subnets); dashboard-side unaffected.
+        _payload["metrics_by_netuid"] = {
+            str(int(m.subnet_id)): {
+                "name": (m.name or ""),
+                "token_price": float(m.token_price or 0.0),
+                "pool_depth": float(m.pool_depth or 0.0),
+                "gini": float(m.genie_score or 0.0),
+                "moving_price": (float(m.moving_price)
+                                 if getattr(m, "moving_price", None) is not None
+                                 else None),
+                "volume_24h": float(m.volume_24h or 0.0),
+            }
+            for m in all_metrics
+        }
+        _payload["identity_by_netuid"] = {
+            str(int(k)): v for k, v in (identity_map or {}).items()
+        }
+        _payload["dereg_watchlist"] = prev_state.get("dereg_watchlist") or []
+        _payload["burn_cost_tao"] = prev_state.get("burn_cost_tao")
+        _payload["burn_cost_delta_tao"] = prev_state.get("burn_cost_delta_tao")
+        _payload["bal_by_netuid"] = {
+            str(int(k)): float(v)
+            for k, v in (bal_by_netuid or {}).items()
+        }
+        _payload["pnl_by_netuid"] = {
+            str(int(k)): float(v)
+            for k, v in (pnl_by_netuid or {}).items()
+            if v is not None
+        }
+        _payload["cost_by_netuid"] = {
+            str(int(k)): float(v)
+            for k, v in (locals().get("cost_by_id") or {}).items()
+            if v is not None
+        }
         payload_json = json.dumps(_payload)
     except Exception as e:
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
