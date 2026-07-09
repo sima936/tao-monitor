@@ -51,7 +51,12 @@ from datetime import datetime, timezone
 import requests
 
 from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis, fetch_subnet_identities
-from tp_cl_stops import evaluate_stops, append_outcome_log, append_dial_log, format_stop_alert, TRAIL_PCT, STOP_PCT
+from tp_cl_stops import (
+    evaluate_stops, detect_entries, evaluate_tp_trims,
+    append_outcome_log, append_dial_log,
+    format_stop_alert, format_tp_trim_alert,
+    TRAIL_PCT, STOP_PCT,
+)
 from subnet_scoring_engine import (
     run_scoring_cycle,
     format_telegram_alert,
@@ -1074,6 +1079,16 @@ def run(
         # Persist current set for next-run comparison (JSON stringifies ints
         # fine; sorted list keeps the file diff-friendly).
         prev_state["known_netuids"] = sorted(current_netuids)
+        # First-seen timestamps for LAUNCH_SCOUT window detection. Only stamp
+        # NEWLY-appearing netuids so legacy state stays out of the window.
+        # Existing netuids without a stamp will never qualify for launch_scout
+        # (correct — they existed before we started tracking).
+        first_seen = dict(prev_state.get("known_netuids_first_seen") or {})
+        for nid in current_netuids:
+            key = str(int(nid))
+            if key not in first_seen:
+                first_seen[key] = time.time()
+        prev_state["known_netuids_first_seen"] = first_seen
     except Exception as e:
         logger.warning(f"New-subnet detector skipped: {e}")
 
@@ -1417,6 +1432,57 @@ def run(
                 f"SN{e['netuid']} {e['event_type']}" for e in stop_events))
             if telegram_token and telegram_chat:
                 send_telegram(format_stop_alert(stop_events), telegram_token, telegram_chat)
+
+        # ─── LAUNCH_SCOUT entries + TP_TRIM ladder ───────────────────────────
+        # Track position entries, flag launch_scout when entry_cost ≤ 1τ AND
+        # netuid was first seen ≤ 7d ago. For flagged positions, fire TP_TRIM
+        # events at each ladder rung crossed (+50%/+100%, trim 25% each). The
+        # trailing stop handles the residual — same mechanism, different mode.
+        # All events flow into outcome_log alongside stops for Hermes to score
+        # after the 60-day forward-return backfill.
+        try:
+            first_seen_map = {
+                int(k): float(v)
+                for k, v in (prev_state.get("known_netuids_first_seen") or {}).items()
+            }
+            entries_in = {
+                int(k): v for k, v in (prev_state.get("position_entries") or {}).items()
+            }
+            entries_out, entry_events = detect_entries(
+                holdings, (bal_by_netuid or {}), cost_by_id, name_by_id,
+                entries_in, first_seen_map, now_ts=time.time(),
+            )
+            entries_out, tp_events = evaluate_tp_trims(
+                holdings, (bal_by_netuid or {}), pnl_by_netuid,
+                regime_by_id, health_by_id, name_by_id,
+                entries_out, now_ts=time.time(),
+            )
+            prev_state["position_entries"] = {
+                str(k): v for k, v in entries_out.items()
+            }
+            if entry_events:
+                append_outcome_log(entry_events)
+                scouts = [e for e in entry_events if e.get("is_launch_scout")]
+                logger.info("ENTRIES: " + " | ".join(
+                    f"SN{e['netuid']}"
+                    f"{'*SCOUT' if e.get('is_launch_scout') else ''}"
+                    for e in entry_events))
+                if scouts:
+                    logger.warning(
+                        f"LAUNCH_SCOUT flagged: {[e['netuid'] for e in scouts]}"
+                    )
+            if tp_events:
+                append_outcome_log(tp_events)
+                logger.warning("TP_TRIM FIRED: " + " | ".join(
+                    f"SN{e['netuid']} rung {e.get('trim_rung_pct')}%"
+                    for e in tp_events))
+                if telegram_token and telegram_chat:
+                    send_telegram(
+                        format_tp_trim_alert(tp_events),
+                        telegram_token, telegram_chat,
+                    )
+        except Exception as e:
+            logger.warning(f"LAUNCH_SCOUT / TP_TRIM block skipped: {e}")
 
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
     _fundamentals = load_fundamentals()
