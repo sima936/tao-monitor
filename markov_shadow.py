@@ -51,10 +51,20 @@ DEFAULT_WINDOW = int(os.environ.get("MARKOV_SHADOW_WINDOW", "10"))
 DEFAULT_THRESHOLD = float(os.environ.get("MARKOV_SHADOW_THRESHOLD", "0.05"))
 MIN_HISTORY_POINTS = DEFAULT_WINDOW + 3   # need window + a few transitions
 
+def _default_log_path(filename: str) -> Path:
+    """Prefer Railway persistent volume (/data) if it's writable, fall back
+    to the script's directory. Files on /app get wiped between cron invocations
+    on Railway; files on /data persist. Local dev works either way."""
+    data = Path("/data")
+    if data.exists() and os.access(data, os.W_OK):
+        return data / filename
+    return Path(__file__).parent / filename
+
+
 MARKOV_SHADOW_LOG_PATH = Path(
     os.environ.get(
         "MARKOV_SHADOW_LOG_PATH",
-        str(Path(__file__).parent / "markov_shadow_log.csv"),
+        str(_default_log_path("markov_shadow_log.csv")),
     )
 )
 
