@@ -52,10 +52,20 @@ LAUNCH_SCOUT_WINDOW_DAYS = float(os.environ.get("LAUNCH_SCOUT_WINDOW_DAYS", "7")
 TP_TRIM_LADDER = [50.0, 100.0]   # pnl_pct rungs (percent)
 TP_TRIM_FRACTION = float(os.environ.get("TP_TRIM_FRACTION", "0.25"))  # 25% per rung
 
+def _default_log_path(filename: str) -> Path:
+    """Prefer Railway persistent volume (/data) if it's writable, fall back
+    to the script's directory. Files on /app get wiped between cron invocations
+    on Railway; files on /data persist. Local dev works either way."""
+    data = Path("/data")
+    if data.exists() and os.access(data, os.W_OK):
+        return data / filename
+    return Path(__file__).parent / filename
+
+
 OUTCOME_LOG_PATH = Path(
     os.environ.get(
         "OUTCOME_LOG_PATH",
-        str(Path(__file__).parent / "outcome_log.csv"),
+        str(_default_log_path("outcome_log.csv")),
     )
 )
 
