@@ -51,6 +51,10 @@ from datetime import datetime, timezone
 import requests
 
 from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics, fetch_cost_basis, fetch_subnet_identities
+from cost_basis_cache import (
+    load_cost_basis_cache, save_cost_basis_cache,
+    cache_age_hours, augment_with_new_positions,
+)
 from tp_cl_stops import (
     evaluate_stops, detect_entries, evaluate_tp_trims,
     append_outcome_log, append_dial_log,
@@ -1391,16 +1395,58 @@ def run(
     # Also yields the real P&L gate for the Telegram trim section.
     pnl_by_netuid = None
     cb = None
-    bal_by_netuid = prefetched_balances        # threaded from main's on-chain holdings resolve
+    _cb_source = None                    # "fresh" | "cache" | "cache+estimated"
+    bal_by_netuid = prefetched_balances  # threaded from main's on-chain holdings resolve
     if cost_basis:
+        # 1. Try fresh taostats fetch.
         try:
             cb = fetch_cost_basis(api_key)
             push_cost_basis_to_dashboard(json.dumps(cb))
-            if bal_by_netuid is None:           # only fetch if main didn't already (#5 de-dup)
-                bal_by_netuid = parse_stake_balances(client.get_wallet_stakes())
-            pnl_by_netuid = compute_holdings_pnl(client, cb, holdings, bal_by_netuid=bal_by_netuid)
+            save_cost_basis_cache(cb)     # snapshot for future fetch failures
+            _cb_source = "fresh"
+            _diag("cost_basis",
+                  f"fresh OK ({len(cb.get('positions', {}))} positions)")
         except Exception as e:
-            logger.warning(f"Cost-basis computation failed (non-fatal): {e}")
+            # 2. Fresh failed — try the disk cache. Only NIOME-trap fix that
+            # keeps stops armed and P&L intact through a taostats blip.
+            logger.warning(f"Cost-basis fresh fetch failed (falling back to cache): {e}")
+            cached = load_cost_basis_cache()
+            if cached:
+                cb = cached
+                _cb_source = "cache"
+                age = cache_age_hours(cached)
+                age_str = f"{age:.1f}h" if age is not None else "unknown age"
+                _diag("cost_basis",
+                      f"FRESH FAILED ({type(e).__name__}) — using cache ({age_str})")
+                logger.warning(f"Using cached cost basis ({age_str})")
+            else:
+                _diag("cost_basis",
+                      f"FRESH FAILED ({type(e).__name__}) — no cache available")
+
+        # 3. Balance fetch + augment + P&L compute. Wrapped separately so a
+        #    balance/P&L error doesn't get miscategorised as a taostats failure.
+        if cb is not None:
+            try:
+                if bal_by_netuid is None:   # only fetch if main didn't (#5 dedup)
+                    bal_by_netuid = parse_stake_balances(client.get_wallet_stakes())
+                # Estimate cost for positions we've entered since the cache was
+                # written. Rough but always available — stops resume in the
+                # same cycle. Only applies to the cache path; fresh already has
+                # every position.
+                if _cb_source == "cache":
+                    cb, estimated = augment_with_new_positions(
+                        cb, bal_by_netuid, all_metrics, holdings,
+                    )
+                    if estimated:
+                        _cb_source = "cache+estimated"
+                        _diag("cost_basis",
+                              f"estimated cost for new positions {estimated} "
+                              "(alpha_bal × current pool price)")
+                pnl_by_netuid = compute_holdings_pnl(
+                    client, cb, holdings, bal_by_netuid=bal_by_netuid,
+                )
+            except Exception as e:
+                logger.warning(f"Balance/P&L compute failed: {e}")
 
     # ── Allocation layer ("be Siam"): score → size. Targets always compute;
     # Drift + per-name actions only when balances are known (cron / threaded). ─
