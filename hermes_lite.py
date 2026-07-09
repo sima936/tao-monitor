@@ -363,6 +363,111 @@ def _render_stability(reports: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _snap_span(snapshots: dict[int, pd.DataFrame]) -> tuple[float | None, int]:
+    """Return (span_days, n_netuids) for a loaded snapshot map. None if empty."""
+    if not snapshots:
+        return None, 0
+    _epoch_arrays = []
+    for _df in snapshots.values():
+        if _df.empty:
+            continue
+        _dts = pd.to_datetime(_df["ts"])
+        try:
+            _epoch = _dts.values.astype("datetime64[ns]").astype("int64") // 10**9
+        except Exception:
+            _epoch = np.array([int(t.timestamp()) for t in _dts])
+        _epoch_arrays.append(_epoch)
+    if not _epoch_arrays:
+        return None, len(snapshots)
+    all_ts = np.concatenate(_epoch_arrays)
+    if not len(all_ts):
+        return None, len(snapshots)
+    return round((all_ts.max() - all_ts.min()) / 86400.0, 2), len(snapshots)
+
+
+def run_full_report(
+    outcome_log_path: Path | None = None,
+    shadow_log_path: Path | None = None,
+) -> dict:
+    """Programmatic entry point — same steps `summary` CLI runs, but returns
+    a structured dict instead of printing. Called by run_scoring.py once per
+    cron; embedded in the dashboard payload for the /hermes Telegram command
+    to render.
+
+    Side-effect: writes fwd_return backfill to the CSV logs on disk. Safe to
+    call every cron because backfill only fills BLANK cells (never overwrites).
+    """
+    here = Path(__file__).parent
+    outcome_log = outcome_log_path or Path(
+        os.environ.get("OUTCOME_LOG_PATH", here / "outcome_log.csv")
+    )
+    shadow_log = shadow_log_path or Path(
+        os.environ.get("MARKOV_SHADOW_LOG_PATH", here / "markov_shadow_log.csv")
+    )
+
+    report: dict = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Step 1: snapshot span + backfill
+    snap = load_snapshot_series()
+    span_d, n_uids = _snap_span(snap)
+    report["snapshot_span_days"] = span_d
+    report["snapshot_netuids"] = n_uids
+    report["fwd_returns_filled"] = {
+        "shadow": backfill_fwd_returns(shadow_log, snapshots=snap),
+        "outcome": backfill_fwd_returns(outcome_log, snapshots=snap),
+    }
+
+    # Step 2: perturbation-stability on the two stops params
+    report["stability"] = [
+        perturbation_stability(outcome_log, "TRAIL_PCT", 0.03),
+        perturbation_stability(outcome_log, "STOP_PCT", 0.05),
+    ]
+
+    # Step 3: IC on the Markov shadow signal
+    report["ic"] = ic_report(shadow_log)
+
+    # Step 4: verdict (matches the CLI summary's logic)
+    h7 = (report["ic"].get("per_horizon", {}) or {}).get(7, {})
+    pooled = h7.get("pooled_ic")
+    stab = h7.get("ic_stability_iqr")
+    verdict: dict = {}
+    if pooled is not None and stab is not None:
+        eff = abs(pooled) * (1 - min(stab, 1))
+        verdict["effective_ic_7d"] = round(eff, 4)
+        verdict["pooled_ic_7d"] = round(pooled, 4)
+        if eff > 0.03:
+            if pooled > 0:
+                verdict["status"] = "candidate_positive"
+                verdict["message"] = (
+                    "Candidate for markov_size_tilt_k > 0 — confirm at 60d "
+                    "before touching the dial."
+                )
+            else:
+                verdict["status"] = "anti_predictive"
+                verdict["message"] = (
+                    "Signal anti-predictive — DO NOT flip k. Investigate "
+                    "whether label mapping is inverted."
+                )
+        else:
+            verdict["status"] = "not_significant"
+            verdict["message"] = (
+                "Below effective-IC threshold (0.03) — keep k=0."
+            )
+    else:
+        verdict["status"] = "insufficient_data"
+        verdict["message"] = (
+            "Not enough forward-return data yet. Continue shadow-logging."
+        )
+    if span_d is not None and span_d < 25:
+        verdict["horizon_caveat"] = (
+            f"Store span short ({span_d:.1f}d). Numbers indicative, not decisive."
+        )
+    report["verdict"] = verdict
+    return report
+
+
 # ── CLI ────────────────────────────────────────────────────────────────
 def main(argv=None):
     p = argparse.ArgumentParser(prog="hermes_lite")
