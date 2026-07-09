@@ -1716,6 +1716,26 @@ def run(
             for k, v in (locals().get("cost_by_id") or {}).items()
             if v is not None
         }
+        # ─── Hermes-lite calibration report ─────────────────────────────
+        # One run per cron. Backfills fwd_returns onto the CSV logs (side
+        # effect), computes IC + perturbation-stability, produces a verdict.
+        # Embedded in the dashboard payload so the /hermes Telegram command
+        # can read it without shell access to this container. Safe to run
+        # every cycle: backfill only fills BLANK cells, IC/stability iterate
+        # bounded rows. Non-fatal on any error.
+        try:
+            from hermes_lite import run_full_report
+            _hermes = run_full_report()
+            prev_state["hermes_report"] = _hermes
+            _payload["hermes_report"] = _hermes
+            _diag("hermes_lite",
+                  f"OK — verdict: {_hermes.get('verdict', {}).get('status', '?')}"
+                  f" · span {_hermes.get('snapshot_span_days')}d"
+                  f" · backfilled shadow/{_hermes.get('fwd_returns_filled', {}).get('shadow', 0)}"
+                  f" outcome/{_hermes.get('fwd_returns_filled', {}).get('outcome', 0)}")
+        except Exception as _he:
+            _diag("hermes_lite", f"SKIPPED ({type(_he).__name__}: {_he})")
+            logger.warning(f"Hermes-lite report skipped: {_he}")
         payload_json = json.dumps(_payload)
     except Exception as e:
         logger.warning(f"Allocation embed failed (non-fatal): {e}")
