@@ -129,13 +129,16 @@ def augment_with_new_positions(
         nid_str = str(nid_int)
         if nid_str in positions:
             continue          # already have a basis (fresh or prior cache)
-        alpha_bal = float(bal_by_netuid.get(nid_int, 0) or 0)
-        if alpha_bal <= min_alpha_balance:
+        bal_tao = float(bal_by_netuid.get(nid_int, 0) or 0)
+        if bal_tao <= min_alpha_balance:
             continue          # not actually held
         price = price_by_id.get(nid_int, 0.0)
         if price <= 0:
             continue          # no price data — can't estimate
-        est_tao = round(alpha_bal * price, 6)
+        # bal_by_netuid is already spot-valued in TAO (see chain_fetch.py /
+        # parse_stake_balances) — use it directly as the cost estimate,
+        # don't multiply by price again (same bug as tao_bot_listener /pnl).
+        est_tao = round(bal_tao, 6)
         positions[nid_str] = {
             "tao_invested": est_tao,
             "tao_in": est_tao,
