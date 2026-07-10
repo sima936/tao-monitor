@@ -1679,6 +1679,26 @@ def run(
         _payload["root_tao"] = (
             bal_by_netuid.get(0, 0.0) if bal_by_netuid else None
         )
+        # 24h price delta per subnet, read-only against the snapshot store
+        # (record_and_deltas below does the actual once-per-cron write; this
+        # just reads the "24h" horizon early so it lands in metrics_by_netuid
+        # for /pnl24h). Omitted (None) per-subnet until the store has an
+        # in-band point — never fabricated as 0.0, same contract as
+        # snapshot_history's other consumers.
+        try:
+            from snapshot_history import compute_deltas as _compute_deltas_24h
+            _price_now_24h = {
+                int(m.subnet_id): float(m.token_price)
+                for m in all_metrics if m.token_price
+            }
+            _price_deltas_24h = {
+                nid: d.get("24h")
+                for nid, d in _compute_deltas_24h(_price_now_24h).items()
+                if d.get("24h") is not None
+            }
+        except Exception as _pd_e:
+            _price_deltas_24h = {}
+            logger.warning(f"24h price delta compute skipped: {_pd_e}")
         # Per-netuid maps for /brief — bot listener reads these directly from
         # the cached payload instead of doing its own chain reads. Keeps
         # /brief as fast as /status, both cache-served. Modest payload growth
@@ -1693,6 +1713,7 @@ def run(
                                  if getattr(m, "moving_price", None) is not None
                                  else None),
                 "volume_24h": float(m.volume_24h or 0.0),
+                "pct_24h": _price_deltas_24h.get(int(m.subnet_id)),
             }
             for m in all_metrics
         }
