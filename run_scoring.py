@@ -61,6 +61,11 @@ from tp_cl_stops import (
     format_stop_alert, format_tp_trim_alert,
     TRAIL_PCT, STOP_PCT,
 )
+from burn_cascade import (
+    update_burn_history, estimate_daily_rate, forecast_thresholds,
+    check_threshold_crossings, annotate_immunity,
+    format_cascade_footer, format_threshold_alert,
+)
 from subnet_scoring_engine import (
     run_scoring_cycle,
     format_telegram_alert,
@@ -1212,6 +1217,56 @@ def run(
             if burn_cost is not None and prev_burn is not None:
                 burn_delta = float(burn_cost) - float(prev_burn)
 
+            # ─── Cascade tip-off: rolling history → daily rate → threshold ETA
+            # A single 6h delta is too noisy to project from (LS35 showed
+            # 3.32τ / 6h then 0.34τ / 4 min). Keep a 48h rolling window and
+            # linear-fit through it for a stable τ/day rate. All state
+            # persisted in prev_state so we survive cron restarts. Reads:
+            # prev_state["burn_cost_history"]        [[ts, cost], ...]
+            # prev_state["burn_thresholds_alerted"]  {"1000": true, ...}
+            burn_rate_per_day: float | None = None
+            burn_forecasts: dict = {}
+            burn_crossings: list = []
+            if burn_cost is not None:
+                _bh_now = time.time()
+                _hist_in = prev_state.get("burn_cost_history") or []
+                _hist_out = update_burn_history(_hist_in, float(burn_cost), _bh_now)
+                prev_state["burn_cost_history"] = _hist_out
+                burn_rate_per_day = estimate_daily_rate(_hist_out)
+                burn_forecasts = forecast_thresholds(float(burn_cost), burn_rate_per_day)
+                # Threshold crossings this cron (down = cascade nearer). Alert
+                # is de-duped per threshold; upward crossing (registration
+                # happened → burn spikes back up) clears the latch so the
+                # next downward pass re-alerts.
+                _crossed, _alerted_out = check_threshold_crossings(
+                    current=float(burn_cost),
+                    prev=(float(prev_burn) if prev_burn is not None else None),
+                    already_alerted=prev_state.get("burn_thresholds_alerted") or {},
+                )
+                prev_state["burn_thresholds_alerted"] = _alerted_out
+                burn_crossings = _crossed
+                if burn_crossings and telegram_token and telegram_chat:
+                    _msg = format_threshold_alert(
+                        burn_crossings, float(burn_cost),
+                        burn_rate_per_day, burn_forecasts,
+                    )
+                    send_telegram(_msg, telegram_token, telegram_chat)
+                    _diag("burn_cascade", "threshold crossed: " + " ".join(
+                        f"{int(e['threshold'])}τ" for e in burn_crossings))
+                    logger.warning(
+                        "BURN THRESHOLD CROSSED: " + " ".join(
+                            f"{int(e['threshold'])}τ" for e in burn_crossings))
+                elif burn_rate_per_day is not None:
+                    # Silent heartbeat so we can see the tip-off is running.
+                    _future = [(t, d) for t, d in burn_forecasts.items()
+                               if d is not None and d > 0]
+                    if _future:
+                        _future.sort(key=lambda x: x[1])
+                        _nt, _nd = _future[0]
+                        _diag("burn_cascade",
+                              f"rate {burn_rate_per_day:+.1f}τ/d · "
+                              f"next {int(_nt)}τ in {_nd:.1f}d")
+
             # Current ranks {netuid: rank_1based}.
             current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(ranked)}
             held_set = set(holdings or [])
@@ -1238,6 +1293,18 @@ def run(
             if fires and telegram_token and telegram_chat:
                 # One combined message per cron, ordered RISK first
                 fires.sort(key=lambda t: (0 if t[3] == "RISK" else 1, t[1]))
+                # Immunity annotation — filters obvious false candidates
+                # (subnets still in the 4-month immunity window can't be
+                # dereg'd) and adds days_seen context to the rest. Legacy
+                # netuids (stamped in the initial batch when tracking began)
+                # have unknown true birth; they show up as legacy_unknown
+                # and stay in the list because they've had enough history to
+                # fall to bottom-of-moving-price anyway.
+                _fs_map = prev_state.get("known_netuids_first_seen") or {}
+                _annot = {c["netuid"]: c for c in annotate_immunity(
+                    [{"netuid": n} for n, _, _, _ in fires],
+                    _fs_map, now_ts=time.time(),
+                )}
                 header = "⏳ DEREG WATCHLIST"
                 lines = [header]
                 for nid, rank, name, kind in fires:
@@ -1245,12 +1312,23 @@ def run(
                     held_tag = " · HELD" if nid in held_set else ""
                     mp = next((float(m.moving_price) for m in ranked
                                if int(m.subnet_id) == nid), 0.0)
-                    # Prefer taostats identity name over on-chain (identity is
-                    # refreshed on rename; chain metadata can lag).
                     ident = identity_map.get(nid) or {}
                     display_name = (ident.get("name") or "").strip() or name
+                    # Immunity tag: 🛡️ = safe (in immunity, dereg impossible),
+                    # blank = eligible / legacy_unknown (proceed as candidate).
+                    _info = _annot.get(nid) or {}
+                    _st = _info.get("immunity_status")
+                    _ds = _info.get("days_seen")
+                    imm_tag = ""
+                    if _st == "immune":
+                        imm_tag = f" · 🛡️immune {_ds:.0f}d/120d" if _ds else " · 🛡️immune"
+                    elif _ds is not None and _st == "legacy_unknown":
+                        # Only show days_seen for legacy names when it's meaningful
+                        # (past a week — otherwise it's just noise from tracking start).
+                        if _ds >= 7:
+                            imm_tag = f" · seen {_ds:.0f}d"
                     lines.append(f"{icon} SN{nid} · {display_name} — rank #{rank}"
-                                 f" (MA {mp:.4f}τ){held_tag}")
+                                 f" (MA {mp:.4f}τ){held_tag}{imm_tag}")
                     url = (ident.get("url") or "").strip()
                     if url:
                         lines.append(f"   🌐 {url}")
@@ -1723,6 +1801,19 @@ def run(
         _payload["dereg_watchlist"] = prev_state.get("dereg_watchlist") or []
         _payload["burn_cost_tao"] = prev_state.get("burn_cost_tao")
         _payload["burn_cost_delta_tao"] = prev_state.get("burn_cost_delta_tao")
+        # Cascade forecast in payload — enables /brief and future bot listener
+        # commands to show ETA to next threshold without recomputing. Silent
+        # (empty) until history has ≥2 samples.
+        try:
+            _bh_p = prev_state.get("burn_cost_history") or []
+            _br_p = estimate_daily_rate(_bh_p)
+            _bc_p = prev_state.get("burn_cost_tao")
+            _payload["burn_rate_per_day"] = _br_p
+            _payload["burn_forecasts"] = forecast_thresholds(
+                (float(_bc_p) if _bc_p is not None else None), _br_p,
+            )
+        except Exception as _bfe:
+            logger.debug(f"burn forecast payload skipped: {_bfe}")
         _payload["bal_by_netuid"] = {
             str(int(k)): float(v)
             for k, v in (bal_by_netuid or {}).items()
@@ -1956,14 +2047,27 @@ def run(
     # window opening = dereg cascade nearer. Rendered above the store footer so
     # it sits next to the "raw operational" data. Silent if burn_cost isn't
     # available this cron (chain read failed / SDK method probe returned None).
+    # Burn-cost cascade footer — extends the raw burn/delta line with a
+    # per-day rate + ETA to the nearest crossable threshold, so the tip-off
+    # is visible on every digest. Falls back gracefully to the raw line if
+    # history hasn't built up yet (first ~2 cron cycles have <2 samples so
+    # rate is None).
     try:
         _bc = prev_state.get("burn_cost_tao")
         _bd = prev_state.get("burn_cost_delta_tao")
-        if _bc is not None:
-            _delta_str = ""
-            if _bd is not None and abs(float(_bd)) >= 0.01:
-                _delta_str = f" ({float(_bd):+.2f}τ)"
-            msg += f"\n\U0001F525 burn: {float(_bc):.2f}\u03c4{_delta_str}"
+        _bh = prev_state.get("burn_cost_history") or []
+        _br = estimate_daily_rate(_bh)
+        _bf = forecast_thresholds(
+            (float(_bc) if _bc is not None else None), _br
+        )
+        _footer = format_cascade_footer(
+            (float(_bc) if _bc is not None else None),
+            (float(_bd) if _bd is not None else None),
+            _br,
+            _bf,
+        )
+        if _footer:
+            msg += "\n" + _footer
     except Exception as _be:
         logger.debug(f"burn footer skipped: {_be}")
 
