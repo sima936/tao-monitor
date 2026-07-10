@@ -554,6 +554,97 @@ def _format_pnl_from_payload(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_pnl24h_from_payload(data: dict) -> str:
+    """24h book P&L delta, cache-served (same payload as /pnl, /brief).
+
+    Derived from bal_by_netuid (current TAO value — already spot-valued, see
+    /pnl's fix) and the snapshot-history 24h price delta embedded in
+    metrics_by_netuid[nid]["pct_24h"].
+
+    Approximation: assumes alpha unit count unchanged over the trailing 24h
+    (i.e. no trim/add in the window) — bal_then = bal_now / (1 + pct24h/100).
+    A trim/add inside the window will skew that position's delta; fine for a
+    quick pulse-check, not a substitute for /pnl's point-in-time truth.
+
+    Positions with no 24h price point yet (store still accumulating, or a
+    brand-new listing) are omitted from the total and listed separately
+    rather than assumed flat — same "never fabricate a delta" contract as
+    snapshot_history itself.
+    """
+    metrics = data.get("metrics_by_netuid") or {}
+    identity = data.get("identity_by_netuid") or {}
+    bal = data.get("bal_by_netuid") or {}
+
+    rows = []
+    missing = []
+    total_now = 0.0
+    total_then = 0.0
+    for nid_str, bal_raw in bal.items():
+        try:
+            nid = int(nid_str)
+        except (TypeError, ValueError):
+            continue
+        if nid == 0:
+            continue                       # SN0 root — passive APY, not a trade
+        bal_tao = float(bal_raw or 0)
+        if bal_tao <= 0.001:
+            continue
+        m = metrics.get(nid_str) or {}
+        name = ((identity.get(nid_str) or {}).get("name")
+                or m.get("name") or f"SN{nid}").strip() or f"SN{nid}"
+        pct24h = m.get("pct_24h")
+        if pct24h is None:
+            missing.append(name)
+            continue
+        pct24h = float(pct24h)
+        bal_then = bal_tao / (1.0 + pct24h / 100.0)
+        delta_tao = bal_tao - bal_then
+        rows.append({"nid": nid, "name": name, "now": bal_tao,
+                     "delta": delta_tao, "pct": pct24h})
+        total_now += bal_tao
+        total_then += bal_then
+
+    lines = ["🕐 <b>24H BOOK P&amp;L</b>", "━" * 18]
+    if not rows:
+        lines.append("No priced positions with 24h history yet — "
+                     "store still accumulating.")
+    else:
+        rows.sort(key=lambda r: -r["now"])
+        for r in rows:
+            arrow = "🟢" if r["delta"] >= 0 else "🔴"
+            lines.append(f"  SN{r['nid']:<3d} {r['name'][:10]:<10s}  "
+                         f"{arrow} {r['delta']:+.2f}τ ({r['pct']:+.1f}%)")
+        lines.append("")
+        total_delta = total_now - total_then
+        total_pct = (total_delta / total_then * 100.0) if total_then > 0 else None
+        arrow = "🟢" if total_delta >= 0 else "🔴"
+        pct_str = f" ({total_pct:+.1f}%)" if total_pct is not None else ""
+        lines.append(f"<b>{arrow} Alpha book 24h: {total_delta:+.2f}τ{pct_str}</b>")
+
+    if missing:
+        shown = ", ".join(missing[:6])
+        extra = f" +{len(missing) - 6} more" if len(missing) > 6 else ""
+        lines.append("")
+        lines.append(f"⏳ accumulating (no 24h point yet): {shown}{extra}")
+
+    return "\n".join(lines)
+
+
+def handle_pnl24h() -> None:
+    """/pnl24h — 24h book P&L delta from the cached payload."""
+    data = _fetch_latest_score()
+    if not data:
+        send("⚠️ /pnl24h unavailable — dashboard hasn't ingested a scoring run "
+             "yet, or auth env vars are missing. Try /status first.")
+        return
+    try:
+        msg = _format_pnl24h_from_payload(data)
+    except Exception as e:
+        logger.warning(f"pnl24h format failed: {e}")
+        msg = f"⚠️ /pnl24h: failed to format ({type(e).__name__}: {e})"
+    send(msg)
+
+
 def handle_pnl() -> None:
     """/pnl — book-level P&L snapshot from the cached payload."""
     data = _fetch_latest_score()
@@ -685,6 +776,7 @@ def handle_help() -> None:
         "/macro          — show current TAO macro regime\n"
         "/holdings       — show holdings from chain with health scores\n"
         "/pnl            — book P&amp;L snapshot per position\n"
+        "/pnl24h         — 24h book P&amp;L delta\n"
         "/brief &lt;netuid&gt; — per-subnet quick facts (e.g. /brief 107)\n"
         "/hermes         — calibration report (IC, stability, verdict)\n"
         "/help           — this message\n\n"
@@ -697,6 +789,7 @@ HANDLERS = {
     "/macro":    handle_macro,
     "/holdings": handle_holdings,
     "/pnl":      handle_pnl,
+    "/pnl24h":   handle_pnl24h,
     "/hermes":   handle_hermes,
     "/help":     handle_help,
 }
