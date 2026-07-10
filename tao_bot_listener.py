@@ -458,13 +458,16 @@ def _format_pnl_from_payload(data: dict) -> str:
             continue
         if nid == 0:
             continue                       # SN0 root — handled separately
-        alpha_bal = float(bal.get(nid_str, 0) or 0)
-        if alpha_bal <= 0.001:
+        bal_tao = float(bal.get(nid_str, 0) or 0)
+        if bal_tao <= 0.001:
             continue
         m = metrics.get(nid_str) or {}
         price = float(m.get("token_price", 0) or 0)
-        # Position value = alpha × current price (used for display + book total)
-        value_tao = alpha_bal * price
+        # bal_by_netuid is ALREADY spot-valued in TAO (alpha * price, done
+        # upstream in chain_fetch.py / parse_stake_balances — matches
+        # taostats' balance_as_tao). Do NOT multiply by price again here;
+        # that was the source of the 14.7τ /pnl book-total gap.
+        value_tao = bal_tao
         cost_tao = float(cost.get(nid_str, 0) or 0)
         name = ((identity.get(nid_str) or {}).get("name")
                 or m.get("name") or f"SN{nid}").strip() or f"SN{nid}"
