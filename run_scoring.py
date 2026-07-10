@@ -1256,16 +1256,23 @@ def run(
                     logger.warning(
                         "BURN THRESHOLD CROSSED: " + " ".join(
                             f"{int(e['threshold'])}τ" for e in burn_crossings))
-                elif burn_rate_per_day is not None:
-                    # Silent heartbeat so we can see the tip-off is running.
-                    _future = [(t, d) for t, d in burn_forecasts.items()
-                               if d is not None and d > 0]
-                    if _future:
-                        _future.sort(key=lambda x: x[1])
-                        _nt, _nd = _future[0]
-                        _diag("burn_cascade",
-                              f"rate {burn_rate_per_day:+.1f}τ/d · "
-                              f"next {int(_nt)}τ in {_nd:.1f}d")
+                # Unconditional heartbeat — reveals history size + rate every
+                # cron so we can diagnose the accumulation without another
+                # deploy. Rate/ETA only render once ≥2 samples exist.
+                _rate_str = (f"{burn_rate_per_day:+.1f}τ/d"
+                             if burn_rate_per_day is not None else "n/a")
+                _future = [(t, d) for t, d in burn_forecasts.items()
+                           if d is not None and d > 0]
+                if _future:
+                    _future.sort(key=lambda x: x[1])
+                    _nt, _nd = _future[0]
+                    _diag("burn_cascade",
+                          f"hist={len(_hist_out)} rate={_rate_str} "
+                          f"next={int(_nt)}τ in {_nd:.1f}d")
+                else:
+                    _diag("burn_cascade",
+                          f"hist={len(_hist_out)} rate={_rate_str} "
+                          f"(no future crossings)")
 
             # Current ranks {netuid: rank_1based}.
             current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(ranked)}
