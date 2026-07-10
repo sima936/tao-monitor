@@ -422,6 +422,150 @@ def handle_brief(arg: str) -> None:
     send(_format_brief_from_payload(data, netuid))
 
 
+def _format_pnl_from_payload(data: dict) -> str:
+    """Render book-level P&L from the cached cron payload.
+
+    Reads per-netuid maps (bal, cost, pnl, metrics, identity) that run_scoring
+    embeds in the dashboard payload. Same cache-served path as /brief and
+    /hermes — no chain reads, no taostats calls.
+
+    P&L per position uses pnl_by_netuid (compute_holdings_pnl output) when
+    available — same source /brief uses so numbers agree. Falls back to
+    raw `bal × price − cost` only if pnl_by_netuid is missing that netuid.
+
+    Alpha book (traded positions) is treated separately from Root SN0
+    (passive delegation) and Free (idle cash) because they respond to
+    different dynamics — active P&L is what a trader wants to see.
+    """
+    metrics = data.get("metrics_by_netuid") or {}
+    identity = data.get("identity_by_netuid") or {}
+    bal = data.get("bal_by_netuid") or {}
+    cost = data.get("cost_by_netuid") or {}
+    pnl_map = data.get("pnl_by_netuid") or {}
+
+    total_tao = data.get("account_total_tao")
+    root_tao  = data.get("root_tao")
+    free_tao  = data.get("free_tao")
+
+    # Per-position rows
+    rows = []
+    total_value = 0.0
+    total_cost = 0.0
+    for nid_str in bal:
+        try:
+            nid = int(nid_str)
+        except (TypeError, ValueError):
+            continue
+        if nid == 0:
+            continue                       # SN0 root — handled separately
+        alpha_bal = float(bal.get(nid_str, 0) or 0)
+        if alpha_bal <= 0.001:
+            continue
+        m = metrics.get(nid_str) or {}
+        price = float(m.get("token_price", 0) or 0)
+        # Position value = alpha × current price (used for display + book total)
+        value_tao = alpha_bal * price
+        cost_tao = float(cost.get(nid_str, 0) or 0)
+        name = ((identity.get(nid_str) or {}).get("name")
+                or m.get("name") or f"SN{nid}").strip() or f"SN{nid}"
+        # Prefer pnl_by_netuid (same source as /brief) → falls back to raw
+        # value-minus-cost only if pnl_by_netuid doesn't have this netuid.
+        # pnl_by_netuid is stored as a fraction (0.37 = +37%).
+        pnl_raw = pnl_map.get(nid_str)
+        if pnl_raw is not None:
+            pnl_pct = float(pnl_raw) * 100.0
+            # Derive τ P&L from pct + cost (consistent with pnl_by_netuid's
+            # definition, not from raw bal × price which double-counts
+            # realized trims for partially-exited positions).
+            pnl_tao = cost_tao * float(pnl_raw) if cost_tao > 0 else None
+        elif cost_tao > 0:
+            pnl_tao = value_tao - cost_tao
+            pnl_pct = (pnl_tao / cost_tao) * 100.0
+        else:
+            pnl_tao = None
+            pnl_pct = None
+        rows.append({
+            "nid":       nid,
+            "name":      name,
+            "value_tao": value_tao,
+            "cost_tao":  cost_tao,
+            "pnl_tao":   pnl_tao,
+            "pnl_pct":   pnl_pct,
+        })
+        total_value += value_tao
+        if cost_tao > 0:
+            total_cost += cost_tao
+
+    # Format — largest position first
+    rows.sort(key=lambda x: -x["value_tao"])
+
+    lines = ["💰 <b>BOOK P&amp;L</b>", "━" * 18]
+
+    if not rows:
+        lines.append("No alpha positions held.")
+    else:
+        lines.append("<b>Positions:</b>")
+        for r in rows:
+            val = r["value_tao"]
+            cost_r = r["cost_tao"]
+            pnl_pct = r["pnl_pct"]
+            pnl_tao = r["pnl_tao"]
+            if pnl_pct is not None:
+                arrow = "🟢" if pnl_pct >= 0 else "🔴"
+                pnl_str = f"{arrow} {pnl_tao:+.2f}τ ({pnl_pct:+.1f}%)"
+            else:
+                pnl_str = "⚪ no cost basis"
+            # Truncate name so line fits on mobile
+            name_disp = r["name"][:10]
+            lines.append(f"  SN{r['nid']:<3d} {name_disp:<10s}  "
+                         f"{val:>5.2f}τ · cost {cost_r:>4.2f}τ  {pnl_str}")
+
+        lines.append("")
+
+        # Alpha book totals — sum realized+unrealized P&L from per-row source
+        # (pnl_by_netuid if present, raw math otherwise). Consistent with
+        # what /brief shows on each position.
+        book_pnl_tao = sum(r["pnl_tao"] for r in rows if r["pnl_tao"] is not None)
+        if total_cost > 0:
+            book_pnl_pct = (book_pnl_tao / total_cost) * 100.0
+            arrow = "🟢" if book_pnl_pct >= 0 else "🔴"
+            lines.append(f"<b>Alpha book:</b> {total_value:.2f}τ "
+                         f"(cost {total_cost:.2f}τ)")
+            lines.append(f"<b>{arrow} P&amp;L: {book_pnl_tao:+.2f}τ "
+                         f"({book_pnl_pct:+.1f}%)</b>")
+        else:
+            lines.append(f"<b>Alpha book:</b> {total_value:.2f}τ "
+                         "(no cost basis available)")
+
+    lines.append("")
+
+    # Root + free (non-traded)
+    if root_tao is not None:
+        lines.append(f"🌱 Root SN0: {float(root_tao):.2f}τ  <i>(passive APY)</i>")
+    if free_tao is not None:
+        lines.append(f"💵 Free:     {float(free_tao):.2f}τ")
+    if total_tao is not None:
+        lines.append(f"━━━━━━━━━━━━━━━━━━")
+        lines.append(f"<b>Account total: {float(total_tao):.2f}τ</b>")
+
+    return "\n".join(lines)
+
+
+def handle_pnl() -> None:
+    """/pnl — book-level P&L snapshot from the cached payload."""
+    data = _fetch_latest_score()
+    if not data:
+        send("⚠️ /pnl unavailable — dashboard hasn't ingested a scoring run "
+             "yet, or auth env vars are missing. Try /status first.")
+        return
+    try:
+        msg = _format_pnl_from_payload(data)
+    except Exception as e:
+        logger.warning(f"pnl format failed: {e}")
+        msg = f"⚠️ /pnl: failed to format ({type(e).__name__}: {e})"
+    send(msg)
+
+
 def _format_hermes_report(r: dict) -> str:
     """Render hermes_lite calibration report for Telegram.
 
@@ -537,6 +681,7 @@ def handle_help() -> None:
         "/status         — run scoring now and send full update\n"
         "/macro          — show current TAO macro regime\n"
         "/holdings       — show holdings from chain with health scores\n"
+        "/pnl            — book P&amp;L snapshot per position\n"
         "/brief &lt;netuid&gt; — per-subnet quick facts (e.g. /brief 107)\n"
         "/hermes         — calibration report (IC, stability, verdict)\n"
         "/help           — this message\n\n"
@@ -548,6 +693,7 @@ HANDLERS = {
     "/status":   handle_status,
     "/macro":    handle_macro,
     "/holdings": handle_holdings,
+    "/pnl":      handle_pnl,
     "/hermes":   handle_hermes,
     "/help":     handle_help,
 }
