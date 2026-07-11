@@ -1855,9 +1855,28 @@ def run(
         except Exception as _tpe:
             logger.debug(f"tao prices payload skipped: {_tpe}")
             _payload["tao_prices"] = None
+        # Write this cron's snapshot row (+ read back deltas) BEFORE computing
+        # store_stats below. Moved up from the "Free chain snapshots" section
+        # (was previously called after push_score_to_dashboard) so the
+        # store_stats embedded in THIS payload — the one /status reads via
+        # the dashboard cache — reflects the same row count the live digest's
+        # own stats() call sees a few hundred lines later, instead of lagging
+        # it by exactly one cron's worth of rows (129 rows / ~1 cron span).
+        # `deltas` is consumed later (pool-momentum overlay, ~line 2037);
+        # isolated in its own try/except so a snapshot_history failure here
+        # degrades to "no deltas / no store_stats" rather than taking out the
+        # rest of the payload build.
+        deltas: dict[int, dict] = {}
+        try:
+            from snapshot_history import record_and_deltas
+            deltas = record_and_deltas(all_metrics)
+        except Exception as he:
+            logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
         # Snapshot-store stats for the /status footer — same
         # rows/subnets/span_days line the cron digest carries. Read directly
         # via snapshot_history.stats() so we don't have to plumb prev_state.
+        # Runs AFTER record_and_deltas above so this cron's own rows are
+        # already counted (see note above — fixes the one-cron lag).
         try:
             from snapshot_history import stats as _snap_stats_payload
             _payload["store_stats"] = _snap_stats_payload()
@@ -1926,13 +1945,9 @@ def run(
             # Precedence: taostats wins 1h/24h/7d; store keeps 30d. Neither has a
             # horizon -> field omitted (dashboard "—"), never a fabricated 0.0.
 
-            # (2) store first — always record this instant + read back deltas.
-            deltas: dict[int, dict] = {}
-            try:
-                from snapshot_history import record_and_deltas
-                deltas = record_and_deltas(all_metrics)
-            except Exception as he:
-                logger.warning(f"snapshot_history unavailable ({he}) — store deltas skipped")
+            # (2) store: written earlier in this run (before store_stats was
+            # computed for the payload — see that block for why). `deltas`
+            # was already read back there; reused here, not re-fetched.
 
             # ─── Markov signal shadow-log (k=0, no sizing effect) ────────────
             # Record per-subnet Markov regime signal each cron for the full
