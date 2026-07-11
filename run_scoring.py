@@ -457,6 +457,26 @@ def compute_holdings_pnl(client, cost_basis: dict, holdings: list[int],
     return pnl or None
 
 
+def _tg_link(url: str, display: str | None = None) -> str:
+    """Wrap a URL in an HTML anchor for parse_mode='HTML' Telegram messages.
+
+    Fixes a Telegram autolink bug: raw URLs ending in '/' (e.g.
+    'https://nexisgen.ai/') followed by a newline + word get parsed as a
+    single URL running into the next line ('https://nexisgen.ai/\\nBurn').
+    An explicit <a href=...> tag uses the href verbatim and blocks the
+    autolinker from extending the URL past the tag.
+
+    Also HTML-escapes the display text so a URL containing '&' etc. renders
+    correctly.
+    """
+    import html as _html
+    if not url:
+        return ""
+    safe_url = _html.escape(str(url), quote=True)
+    safe_display = _html.escape(str(display or url), quote=False)
+    return f'<a href="{safe_url}">{safe_display}</a>'
+
+
 def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -1153,12 +1173,13 @@ def run(
                         lines.append(f"   {desc[:140]}")
                     url = (ident.get("url") or "").strip()
                     if url:
-                        lines.append(f"   🌐 {url}")
+                        lines.append(f"   🌐 {_tg_link(url)}")
                     gh = (ident.get("github") or "").strip()
                     if gh:
-                        lines.append(f"   💻 {gh}")
+                        lines.append(f"   💻 {_tg_link(gh)}")
                 lines.append(f"Total: {len(known_netuids)} → {len(current_netuids)}")
-                lines.append(f"Check: https://tao.app/subnets/{new_netuids[0]}")
+                _check_url = f"https://tao.app/subnets/{new_netuids[0]}"
+                lines.append(f"Check: {_tg_link(_check_url)}")
                 send_telegram("\n".join(lines), telegram_token, telegram_chat)
                 logger.warning(f"NEW SUBNETS: {new_netuids}")
         # Persist current set for next-run comparison (JSON stringifies ints
@@ -1338,14 +1359,15 @@ def run(
                                  f" (MA {mp:.4f}τ){held_tag}{imm_tag}")
                     url = (ident.get("url") or "").strip()
                     if url:
-                        lines.append(f"   🌐 {url}")
+                        lines.append(f"   🌐 {_tg_link(url)}")
                 if burn_cost is not None:
                     if burn_delta is not None and abs(burn_delta) >= 0.01:
                         sign = "+" if burn_delta >= 0 else ""
                         lines.append(f"Burn: {burn_cost:.2f}τ  ({sign}{burn_delta:.2f}τ)")
                     else:
                         lines.append(f"Burn: {burn_cost:.2f}τ")
-                lines.append(f"tao.app/subnets/{fires[0][0]}")
+                _tao_url = f"https://tao.app/subnets/{fires[0][0]}"
+                lines.append(_tg_link(_tao_url, display=f"tao.app/subnets/{fires[0][0]}"))
                 send_telegram("\n".join(lines), telegram_token, telegram_chat)
                 _diag("dereg", f"alert fired ({len(fires)} subnets): "
                       f"{[(n, r, k) for n, r, _, k in fires]}")
