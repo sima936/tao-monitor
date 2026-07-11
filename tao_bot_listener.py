@@ -191,16 +191,68 @@ def _format_status_from_payload(data: dict) -> str:
     # payloads (pre-fix) won't have it → the tail gracefully degrades.
     root_tao = data.get("root_tao")
 
-    return format_actionable_digest(
+    # Prefer payload-cached TAO prices (cron already fetched them). Falls
+    # back to a fresh get_tao_prices() call for older payloads without the
+    # key, and again to empty when both fail (silent — the digest just
+    # loses the ~£X / $Y tail rather than failing to render).
+    payload_prices = data.get("tao_prices") or {}
+    usd = payload_prices.get("usd") or prices.get("usd")
+    gbp = payload_prices.get("gbp") or prices.get("gbp")
+
+    msg = format_actionable_digest(
         plan,
         free_tao=free_tao,
         account_tao=account_total_tao,
         ts=ts_hhmm,
         fundamentals=fundamentals,
         root_tao=root_tao,
-        tao_usd=prices.get("usd"),
-        tao_gbp=prices.get("gbp"),
+        tao_usd=usd,
+        tao_gbp=gbp,
     )
+
+    # Burn cascade footer — same one the 6h cron appends. All inputs already
+    # in the payload, so no need to import burn_cascade here (would work
+    # anyway since both services deploy from the same repo, but keeps the
+    # listener honest about its "cache-served" contract).
+    try:
+        bc = data.get("burn_cost_tao")
+        bd = data.get("burn_cost_delta_tao")
+        br = data.get("burn_rate_per_day")
+        bf = data.get("burn_forecasts") or {}
+        if bc is not None:
+            from burn_cascade import format_cascade_footer
+            # burn_forecasts keys arrive as strings after JSON round-trip;
+            # format_cascade_footer picks nearest by numeric value regardless,
+            # but we cast keys back for robustness.
+            bf_num = {}
+            for k, v in bf.items():
+                try:
+                    bf_num[float(k)] = v
+                except (TypeError, ValueError):
+                    continue
+            footer = format_cascade_footer(
+                float(bc),
+                (float(bd) if bd is not None else None),
+                (float(br) if br is not None else None),
+                bf_num,
+            )
+            if footer:
+                msg += "\n" + footer
+    except Exception as _bfe:
+        logger.debug(f"/status burn footer skipped: {_bfe}")
+
+    # Store-health footer — from payload (populated by cron). Same
+    # rows/subnets/span line the cron carries.
+    try:
+        ss = data.get("store_stats") or {}
+        if ss and "error" not in ss:
+            msg += (f"\n\n\U0001F4CA store: {ss.get('rows', 0)} rows \u00b7 "
+                    f"{ss.get('netuids', 0)} subnets \u00b7 "
+                    f"{ss.get('span_days', 0)}d span")
+    except Exception as _sse:
+        logger.debug(f"/status store footer skipped: {_sse}")
+
+    return msg
 
 
 def handle_status() -> None:
