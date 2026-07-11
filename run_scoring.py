@@ -1821,6 +1821,26 @@ def run(
             )
         except Exception as _bfe:
             logger.debug(f"burn forecast payload skipped: {_bfe}")
+        # Cache TAO spot prices in the payload so /status renders the
+        # (~£X / $Y) tail without having to re-hit CoinGecko from the
+        # listener container (different egress IP, hits rate limits when
+        # both containers ask at the same time). spot_price is
+        # cache-backed so this is cheap even though the cron will fetch
+        # again a few lines later for its own digest.
+        try:
+            from spot_price import get_tao_prices as _get_tp
+            _payload["tao_prices"] = _get_tp()
+        except Exception as _tpe:
+            logger.debug(f"tao prices payload skipped: {_tpe}")
+            _payload["tao_prices"] = None
+        # Snapshot-store stats for the /status footer — same
+        # rows/subnets/span_days line the cron digest carries. Read directly
+        # via snapshot_history.stats() so we don't have to plumb prev_state.
+        try:
+            from snapshot_history import stats as _snap_stats_payload
+            _payload["store_stats"] = _snap_stats_payload()
+        except Exception as _sse:
+            logger.debug(f"store stats payload skipped: {_sse}")
         _payload["bal_by_netuid"] = {
             str(int(k)): float(v)
             for k, v in (bal_by_netuid or {}).items()
