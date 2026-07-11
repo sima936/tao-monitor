@@ -1000,6 +1000,41 @@ def run(
 
     # Fetch subnet data
     client = TaostatsClient(api_key=api_key)
+
+    # ─── v2 real-price-history top-up (before chain fetch) ──────────────────
+    # `chain_fetch._dynamicinfos_to_metrics` reads per-subnet daily closes from
+    # `subnet_price_history` (SQLite on the SA volume, populated by GeckoTerminal
+    # daily OHLCV) when assembling `all_metrics`. Running the top-up here means
+    # THIS cycle's `all_metrics` gets today's fresh bars, not yesterday's — and
+    # the scoring engine's pct_change_24h / pct_change_7d / p9_data_maturity /
+    # Markov regime all read off real movement, unblocking the Opportunities
+    # tab (previously showing 12 subnets with identical placeholders because
+    # everyone's history was a 9-bar flat synthetic).
+    #
+    # Candidate universe = every netuid we've seen before (via
+    # known_netuids_first_seen, populated by the LAUNCH_SCOUT wiring). On the
+    # first-ever cron that key won't exist yet, so we bootstrap with a
+    # 1..~129 range — that pass will fetch what actually exists on GT and
+    # populate the store; from then on the real known-netuid set drives it.
+    # Fully guarded — a store/GT failure never blocks the cycle, chain_fetch
+    # just falls back to flat synthetic exactly as before the v2 rollout.
+    try:
+        from subnet_price_history import ensure_ready, top_up_stale
+        _known = prev_state.get("known_netuids_first_seen") or {}
+        _cand_ids = sorted(int(k) for k in _known.keys()) if _known else list(range(1, 130))
+        # ensure_ready is idempotent: fast no-op on populated store; runs the
+        # ~9min full backfill exactly once (first-ever cron), then never again.
+        ensure_ready(_cand_ids)
+        # Steady-state refresh: only fetches subnets whose newest stored bar is
+        # >20h old, so amortises to ~32 subnets/cron across 4 crons/day (~2min).
+        # max_to_fetch=40 is a safety cap in case a large chunk goes stale
+        # simultaneously (e.g. after a multi-day outage) — keeps the worst-case
+        # cron under 3min added.
+        top_up_stale(_cand_ids, max_to_fetch=40)
+    except Exception as _phe:
+        _diag("price_hist", f"init/topup skipped ({type(_phe).__name__}: {_phe})")
+        logger.warning(f"Price-history top-up skipped (non-fatal): {_phe}")
+
     try:
         # PRIMARY: free subnet metrics from chain (all_subnets): price, pool
         # depth, volume. None -> fall back to taostats (costs credits).
