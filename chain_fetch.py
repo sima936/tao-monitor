@@ -238,29 +238,48 @@ def _dynamicinfos_to_metrics(subnets):
 
     Maps chain fields to the same shape taostats fetch_all_subnet_metrics returns:
       price -> token_price, tao_in -> pool_depth, subnet_volume -> volume_24h,
-      genie_score = 0.5 (concentration is off), plus a synthetic price history
-      (per-subnet history was already synthetic on the taostats path). A crude
-      trend slope is derived from moving_price (a real chain EMA) when present,
-      else flat.
+      genie_score = 0.5 (concentration is off), plus a REAL daily price history
+      pulled from `subnet_price_history` (v2 layer) when available.
+
+    History source, in order:
+      1) subnet_price_history store — persistent SQLite of daily GT closes.
+         This is the v2 real-history layer; populated by top_up_stale() /
+         backfill_full() run from run_scoring.py earlier in the cycle. Gives
+         every subnet honest 24h/7d pct-changes and a real p9_data_maturity,
+         which drives Opportunities/Scanner/scoring off actual movement.
+      2) Flat synthetic fallback — kept for subnets the store doesn't cover
+         (brand-new pools, GT-less subnets, or the first ever cron before
+         backfill completes). Deliberately flat: deriving a per-subnet trend
+         from a single snapshot once invented bearish regimes in a pullback
+         and flipped held names to EXIT — a "sell everything" digest. The
+         invariant "never fabricate trend from a snapshot" stands.
+
+    Downstream never sees the fallback vs real distinction — the shape is
+    identical. The scoring engine's p9_data_maturity is what surfaces the
+    difference (higher score for longer real history, ~50 constant for the
+    9-bar synthetic).
     """
     from taostats_fetch import SubnetMetrics, _synthetic_history
     import datetime as _dt
+
+    # Import the store lazily so this module remains usable in environments
+    # where subnet_price_history is absent (e.g. legacy container image before
+    # the v2 rollout). Missing store => everyone gets the flat synthetic,
+    # exactly matching pre-v2 behaviour.
+    try:
+        from subnet_price_history import get_bars as _get_store_bars
+    except Exception:
+        _get_store_bars = None  # type: ignore[assignment]
+
     now = _dt.datetime.now(_dt.timezone.utc)
+    real_count = 0
+    synth_count = 0
     out = []
     for di in subnets or []:
         nid = int(di.netuid)
         price = _as_float(getattr(di, "price", 0.0))
         depth = _as_float(getattr(di, "tao_in", 0.0))
         vol = _as_float(getattr(di, "subnet_volume", 0.0))
-        # FLAT synthetic history (no fabricated trend). Deriving a per-subnet
-        # trend from price-vs-moving_price invented bearish regimes in a
-        # pullback, flipping held names to EXIT -> a "sell everything" digest.
-        # A single snapshot has no honest trend; regime stays Sideways and the
-        # macro (CoinGecko) signal does portfolio-level risk-off. Real per-
-        # subnet history is a separate (v2) job.
-        hist = _synthetic_history(price, 0.0, 0.0)
-        ts = [(now - _dt.timedelta(days=(len(hist) - 1 - i))).isoformat()
-              for i in range(len(hist))]
         name = getattr(di, "subnet_name", None)
         if isinstance(name, (bytes, bytearray)):
             name = bytes(name).decode("utf-8", "ignore")
@@ -273,12 +292,58 @@ def _dynamicinfos_to_metrics(subnets):
             mp = _as_float(mp) if mp is not None else None
         except Exception:
             mp = None
+
+        # 1) Try the real-history store first.
+        hist: list[float] = []
+        ts: list[str] = []
+        if _get_store_bars is not None:
+            try:
+                _closes, _stamps = _get_store_bars(nid, limit=120)
+                # A single stored bar isn't a series — the scoring engine's
+                # p9 / Markov / EMA all need meaningful depth. Below 7 bars we
+                # treat the store as "not ready" for this subnet and fall
+                # through to the flat synthetic below (same policy as GT's
+                # min_bars in fetch_history_for_netuids).
+                if len(_closes) >= 7:
+                    # Append today's LIVE chain price as the freshest bar so
+                    # the series ends at the current moment, not yesterday's
+                    # close. Only add it if the stored newest bar is at least
+                    # 12h old, otherwise treat the live price as an update to
+                    # today's still-forming bar (skip append to avoid an
+                    # artificial duplicate).
+                    try:
+                        _last_dt = _dt.datetime.fromisoformat(
+                            _stamps[-1].replace("Z", "+00:00")
+                        )
+                        _age_h = (now - _last_dt).total_seconds() / 3600.0
+                    except Exception:
+                        _age_h = 0.0
+                    if _age_h >= 12.0 and price > 0:
+                        _closes = list(_closes) + [price]
+                        _stamps = list(_stamps) + [now.isoformat()]
+                    hist = _closes
+                    ts = _stamps
+                    real_count += 1
+            except Exception:
+                # Store read failed for this subnet — fall through to synthetic.
+                pass
+
+        # 2) Flat synthetic fallback (empty/sparse store, or store unavailable).
+        if not hist:
+            hist = _synthetic_history(price, 0.0, 0.0)
+            ts = [(now - _dt.timedelta(days=(len(hist) - 1 - i))).isoformat()
+                  for i in range(len(hist))]
+            synth_count += 1
+
         out.append(SubnetMetrics(
             subnet_id=nid, name=name, token_price=price, pool_depth=depth,
             genie_score=0.5, price_history=hist, timestamps=ts,
             volume_24h=vol, volume_7d=0.0,
             moving_price=mp,
         ))
+    _diag(
+        f"history assembly — {real_count} real (store) · {synth_count} synthetic"
+    )
     return out
 
 
