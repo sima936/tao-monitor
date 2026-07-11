@@ -332,7 +332,14 @@ def handle_holdings() -> None:
         failed = {f["subnet_id"]: f["reason"] for f in scoring_result.filtered_out}
 
         for sn_id in holdings:
-            if sn_id in failed:
+            if sn_id == 0:
+                # SN0 is root/passive APY — no alpha-pool token, so it
+                # always fails the alpha price gate in run_scoring_cycle.
+                # That's a design characteristic, not a warning; render it
+                # as a distinct passive line using the same 🌱 convention
+                # the /pnl output uses.
+                lines.append("🌱 SN0 — root (passive APY)")
+            elif sn_id in failed:
                 lines.append(f"🔴 SN{sn_id} — {failed[sn_id]}")
             elif sn_id in scored:
                 s = scored[sn_id]
