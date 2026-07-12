@@ -7,7 +7,9 @@ Runs as a persistent background process on Infinity8 (separate from cron).
 Commands:
     /status   — run full scoring cycle and send results immediately
     /macro    — show current TAO macro regime from tao_macro.json
-    /holdings — show current holdings pass/fail status
+    /book     — combined holdings + P&L + 24h delta
+    /brief N  — per-subnet quick facts
+    /hermes   — calibration report
     /help     — list available commands
 
 Start (background):
@@ -36,8 +38,6 @@ import time
 from pathlib import Path
 
 import requests
-
-from taostats_fetch import fetch_wallet_holdings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -309,49 +309,6 @@ def handle_macro() -> None:
         send(f"🔴 Error fetching macro: {e}")
 
 
-def handle_holdings() -> None:
-    """Show current holdings status — fetches real positions from chain."""
-    send("⏳ Checking holdings...")
-    try:
-        # Fetch real holdings from chain
-        holdings = fetch_wallet_holdings(API_KEY)
-        if not holdings:
-            send("⚠️ Could not fetch wallet holdings from chain")
-            return
-
-        sys.path.insert(0, str(SCRIPT_DIR))
-        from taostats_fetch import TaostatsClient, fetch_all_subnet_metrics
-        from subnet_scoring_engine import run_scoring_cycle
-
-        client = TaostatsClient(api_key=API_KEY)
-        all_metrics = fetch_all_subnet_metrics(client, fetch_concentration=False)
-        scoring_result = run_scoring_cycle(all_metrics, top_n=5)
-
-        lines = [f"📋 <b>Holdings Status</b> ({len(holdings)} positions)\n━━━━━━━━━━━━━━━━━━━━"]
-        scored = {s.subnet_id: s for s in scoring_result.ranked_by_health}
-        failed = {f["subnet_id"]: f["reason"] for f in scoring_result.filtered_out}
-
-        for sn_id in holdings:
-            if sn_id == 0:
-                # SN0 is root/passive APY — no alpha-pool token, so it
-                # always fails the alpha price gate in run_scoring_cycle.
-                # That's a design characteristic, not a warning; render it
-                # as a distinct passive line using the same 🌱 convention
-                # the /pnl output uses.
-                lines.append("🌱 SN0 — root (passive APY)")
-            elif sn_id in failed:
-                lines.append(f"🔴 SN{sn_id} — {failed[sn_id]}")
-            elif sn_id in scored:
-                s = scored[sn_id]
-                chg = f" 24h:{s.pct_change_24h:+.0%}" if s.pct_change_24h is not None else ""
-                lines.append(f"✅ SN{sn_id} ({s.name}) H:{s.health_score:.0f}{chg}")
-            else:
-                lines.append(f"✅ SN{sn_id} — passing")
-        send("\n".join(lines))
-    except Exception as e:
-        send(f"🔴 Error checking holdings: {e}")
-
-
 def _format_brief_from_payload(data: dict, netuid: int) -> str:
     """Render /brief output from the cached cron payload.
 
@@ -481,35 +438,42 @@ def handle_brief(arg: str) -> None:
     send(_format_brief_from_payload(data, netuid))
 
 
-def _format_pnl_from_payload(data: dict) -> str:
-    """Render book-level P&L from the cached cron payload.
+def _format_book_from_payload(data: dict) -> str:
+    """Combined book view — holdings + P&L + 24h delta, one message.
 
-    Reads per-netuid maps (bal, cost, pnl, metrics, identity) that run_scoring
-    embeds in the dashboard payload. Same cache-served path as /brief and
-    /hermes — no chain reads, no taostats calls.
+    All from the cached cron payload — no chain reads, no fresh scoring cycle.
+    Replaces the earlier /holdings + /pnl + /pnl24h trio.
 
-    P&L per position uses pnl_by_netuid (compute_holdings_pnl output) when
-    available — same source /brief uses so numbers agree. Falls back to
-    raw `bal × price − cost` only if pnl_by_netuid is missing that netuid.
+    Reads:
+      bal_by_netuid       — current TAO value per position (already spot-valued)
+      cost_by_netuid      — cost basis per position
+      pnl_by_netuid       — realized+unrealized pnl fraction (0.37 = +37%)
+      metrics_by_netuid   — name + pct_24h (from snapshot_history compute_deltas)
+      health_by_netuid    — health score per position (from scoring cycle)
+      identity_by_netuid  — subnet identity (preferred name source)
+      root_tao / free_tao / account_total_tao — book totals
 
-    Alpha book (traded positions) is treated separately from Root SN0
-    (passive delegation) and Free (idle cash) because they respond to
-    different dynamics — active P&L is what a trader wants to see.
+    24h is drawn from metrics_by_netuid[nid]["pct_24h"] (the snapshot_history
+    compute_deltas 24h source used by /brief), NOT from SubnetScore.pct_change_24h
+    which is inter-bar, not 24h.
     """
-    metrics = data.get("metrics_by_netuid") or {}
+    metrics  = data.get("metrics_by_netuid")  or {}
     identity = data.get("identity_by_netuid") or {}
-    bal = data.get("bal_by_netuid") or {}
-    cost = data.get("cost_by_netuid") or {}
-    pnl_map = data.get("pnl_by_netuid") or {}
+    bal      = data.get("bal_by_netuid")      or {}
+    cost     = data.get("cost_by_netuid")     or {}
+    pnl_map  = data.get("pnl_by_netuid")      or {}
+    health   = data.get("health_by_netuid")   or {}
 
     total_tao = data.get("account_total_tao")
     root_tao  = data.get("root_tao")
     free_tao  = data.get("free_tao")
 
-    # Per-position rows
     rows = []
     total_value = 0.0
     total_cost = 0.0
+    total_value_then = 0.0
+    missing_24h = []
+
     for nid_str in bal:
         try:
             nid = int(nid_str)
@@ -521,83 +485,105 @@ def _format_pnl_from_payload(data: dict) -> str:
         if bal_tao <= 0.001:
             continue
         m = metrics.get(nid_str) or {}
-        price = float(m.get("token_price", 0) or 0)
-        # bal_by_netuid is ALREADY spot-valued in TAO (alpha * price, done
-        # upstream in chain_fetch.py / parse_stake_balances — matches
-        # taostats' balance_as_tao). Do NOT multiply by price again here;
-        # that was the source of the 14.7τ /pnl book-total gap.
-        value_tao = bal_tao
         cost_tao = float(cost.get(nid_str, 0) or 0)
         name = ((identity.get(nid_str) or {}).get("name")
                 or m.get("name") or f"SN{nid}").strip() or f"SN{nid}"
-        # Prefer pnl_by_netuid (same source as /brief) → falls back to raw
-        # value-minus-cost only if pnl_by_netuid doesn't have this netuid.
+
+        # P&L — prefer pnl_by_netuid (same source as /brief), fall back to
+        # raw value-minus-cost only if pnl_by_netuid doesn't have this netuid.
         # pnl_by_netuid is stored as a fraction (0.37 = +37%).
         pnl_raw = pnl_map.get(nid_str)
         if pnl_raw is not None:
             pnl_pct = float(pnl_raw) * 100.0
-            # Derive τ P&L from pct + cost (consistent with pnl_by_netuid's
-            # definition, not from raw bal × price which double-counts
-            # realized trims for partially-exited positions).
             pnl_tao = cost_tao * float(pnl_raw) if cost_tao > 0 else None
         elif cost_tao > 0:
-            pnl_tao = value_tao - cost_tao
+            pnl_tao = bal_tao - cost_tao
             pnl_pct = (pnl_tao / cost_tao) * 100.0
         else:
             pnl_tao = None
             pnl_pct = None
+
+        # 24h — from snapshot_history compute_deltas, embedded in metrics as
+        # a percent number (e.g. 2.1 means +2.1%). Same source /pnl24h used.
+        pct24h = m.get("pct_24h")
+        if pct24h is not None:
+            pct24h = float(pct24h)
+            bal_then = bal_tao / (1.0 + pct24h / 100.0)
+        else:
+            bal_then = None
+            missing_24h.append(name)
+
         rows.append({
-            "nid":       nid,
-            "name":      name,
-            "value_tao": value_tao,
-            "cost_tao":  cost_tao,
-            "pnl_tao":   pnl_tao,
-            "pnl_pct":   pnl_pct,
+            "nid":     nid,
+            "name":    name,
+            "value":   bal_tao,
+            "cost":    cost_tao,
+            "pnl_tao": pnl_tao,
+            "pnl_pct": pnl_pct,
+            "pct24h":  pct24h,
+            "health":  health.get(nid_str),
         })
-        total_value += value_tao
+        total_value += bal_tao
         if cost_tao > 0:
             total_cost += cost_tao
+        if bal_then is not None:
+            total_value_then += bal_then
 
-    # Format — largest position first
-    rows.sort(key=lambda x: -x["value_tao"])
+    # Largest position first (matches old /pnl ordering)
+    rows.sort(key=lambda r: -r["value"])
 
-    lines = ["💰 <b>BOOK P&amp;L</b>", "━" * 18]
+    lines = [f"📋 <b>BOOK</b> ({len(rows)} positions + root)", "━" * 18]
 
     if not rows:
         lines.append("No alpha positions held.")
     else:
-        lines.append("<b>Positions:</b>")
         for r in rows:
-            val = r["value_tao"]
-            cost_r = r["cost_tao"]
+            h = r["health"]
+            h_str = f"H:{h:.0f} " if h is not None else ""
             pnl_pct = r["pnl_pct"]
-            pnl_tao = r["pnl_tao"]
             if pnl_pct is not None:
                 arrow = "🟢" if pnl_pct >= 0 else "🔴"
-                pnl_str = f"{arrow} {pnl_tao:+.2f}τ ({pnl_pct:+.1f}%)"
+                pnl_str = f"{arrow} {pnl_pct:+5.1f}%"
             else:
-                pnl_str = "⚪ no cost basis"
-            # Truncate name so line fits on mobile
+                pnl_str = "⚪ no basis"
+            if r["pct24h"] is not None:
+                p24_str = f"  24h:{r['pct24h']:+.1f}%"
+            else:
+                p24_str = "  24h:—"
             name_disp = r["name"][:10]
-            lines.append(f"  SN{r['nid']:<3d} {name_disp:<10s}  "
-                         f"{val:>5.2f}τ · cost {cost_r:>4.2f}τ  {pnl_str}")
+            lines.append(
+                f"SN{r['nid']:<3d} {name_disp:<10s} {h_str}"
+                f"{r['value']:>5.2f}τ · cost {r['cost']:>4.2f}τ  "
+                f"{pnl_str}{p24_str}"
+            )
 
         lines.append("")
 
-        # Alpha book totals — sum realized+unrealized P&L from per-row source
-        # (pnl_by_netuid if present, raw math otherwise). Consistent with
-        # what /brief shows on each position.
+        # Book totals — same convention as /pnl (sum pnl_by_netuid rows)
         book_pnl_tao = sum(r["pnl_tao"] for r in rows if r["pnl_tao"] is not None)
         if total_cost > 0:
             book_pnl_pct = (book_pnl_tao / total_cost) * 100.0
             arrow = "🟢" if book_pnl_pct >= 0 else "🔴"
-            lines.append(f"<b>Alpha book:</b> {total_value:.2f}τ "
-                         f"(cost {total_cost:.2f}τ)")
-            lines.append(f"<b>{arrow} P&amp;L: {book_pnl_tao:+.2f}τ "
-                         f"({book_pnl_pct:+.1f}%)</b>")
+            lines.append(
+                f"<b>Alpha book:</b> {total_value:.2f}τ (cost {total_cost:.2f}τ)  "
+                f"{arrow} <b>{book_pnl_tao:+.2f}τ ({book_pnl_pct:+.1f}%)</b>"
+            )
         else:
-            lines.append(f"<b>Alpha book:</b> {total_value:.2f}τ "
-                         "(no cost basis available)")
+            lines.append(f"<b>Alpha book:</b> {total_value:.2f}τ (no cost basis)")
+
+        # 24h book delta — same convention as /pnl24h (assumes alpha unit
+        # count unchanged over 24h; approximation, breaks on trims/adds)
+        if total_value_then > 0:
+            book_delta_24h = total_value - total_value_then
+            book_pct_24h = book_delta_24h / total_value_then * 100.0
+            arrow24 = "🟢" if book_delta_24h >= 0 else "🔴"
+            lines.append(
+                f"<b>24h:</b> {arrow24} {book_delta_24h:+.2f}τ ({book_pct_24h:+.1f}%)"
+            )
+        elif missing_24h:
+            shown = ", ".join(missing_24h[:4])
+            extra = f" +{len(missing_24h) - 4} more" if len(missing_24h) > 4 else ""
+            lines.append(f"<b>24h:</b> ⏳ accumulating ({shown}{extra})")
 
     lines.append("")
 
@@ -607,115 +593,24 @@ def _format_pnl_from_payload(data: dict) -> str:
     if free_tao is not None:
         lines.append(f"💵 Free:     {float(free_tao):.2f}τ")
     if total_tao is not None:
-        lines.append(f"━━━━━━━━━━━━━━━━━━")
-        lines.append(f"<b>Account total: {float(total_tao):.2f}τ</b>")
+        lines.append("━" * 18)
+        lines.append(f"<b>Account: {float(total_tao):.2f}τ</b>")
 
     return "\n".join(lines)
 
 
-def _format_pnl24h_from_payload(data: dict) -> str:
-    """24h book P&L delta, cache-served (same payload as /pnl, /brief).
-
-    Derived from bal_by_netuid (current TAO value — already spot-valued, see
-    /pnl's fix) and the snapshot-history 24h price delta embedded in
-    metrics_by_netuid[nid]["pct_24h"].
-
-    Approximation: assumes alpha unit count unchanged over the trailing 24h
-    (i.e. no trim/add in the window) — bal_then = bal_now / (1 + pct24h/100).
-    A trim/add inside the window will skew that position's delta; fine for a
-    quick pulse-check, not a substitute for /pnl's point-in-time truth.
-
-    Positions with no 24h price point yet (store still accumulating, or a
-    brand-new listing) are omitted from the total and listed separately
-    rather than assumed flat — same "never fabricate a delta" contract as
-    snapshot_history itself.
-    """
-    metrics = data.get("metrics_by_netuid") or {}
-    identity = data.get("identity_by_netuid") or {}
-    bal = data.get("bal_by_netuid") or {}
-
-    rows = []
-    missing = []
-    total_now = 0.0
-    total_then = 0.0
-    for nid_str, bal_raw in bal.items():
-        try:
-            nid = int(nid_str)
-        except (TypeError, ValueError):
-            continue
-        if nid == 0:
-            continue                       # SN0 root — passive APY, not a trade
-        bal_tao = float(bal_raw or 0)
-        if bal_tao <= 0.001:
-            continue
-        m = metrics.get(nid_str) or {}
-        name = ((identity.get(nid_str) or {}).get("name")
-                or m.get("name") or f"SN{nid}").strip() or f"SN{nid}"
-        pct24h = m.get("pct_24h")
-        if pct24h is None:
-            missing.append(name)
-            continue
-        pct24h = float(pct24h)
-        bal_then = bal_tao / (1.0 + pct24h / 100.0)
-        delta_tao = bal_tao - bal_then
-        rows.append({"nid": nid, "name": name, "now": bal_tao,
-                     "delta": delta_tao, "pct": pct24h})
-        total_now += bal_tao
-        total_then += bal_then
-
-    lines = ["🕐 <b>24H BOOK P&amp;L</b>", "━" * 18]
-    if not rows:
-        lines.append("No priced positions with 24h history yet — "
-                     "store still accumulating.")
-    else:
-        rows.sort(key=lambda r: -r["now"])
-        for r in rows:
-            arrow = "🟢" if r["delta"] >= 0 else "🔴"
-            lines.append(f"  SN{r['nid']:<3d} {r['name'][:10]:<10s}  "
-                         f"{arrow} {r['delta']:+.2f}τ ({r['pct']:+.1f}%)")
-        lines.append("")
-        total_delta = total_now - total_then
-        total_pct = (total_delta / total_then * 100.0) if total_then > 0 else None
-        arrow = "🟢" if total_delta >= 0 else "🔴"
-        pct_str = f" ({total_pct:+.1f}%)" if total_pct is not None else ""
-        lines.append(f"<b>{arrow} Alpha book 24h: {total_delta:+.2f}τ{pct_str}</b>")
-
-    if missing:
-        shown = ", ".join(missing[:6])
-        extra = f" +{len(missing) - 6} more" if len(missing) > 6 else ""
-        lines.append("")
-        lines.append(f"⏳ accumulating (no 24h point yet): {shown}{extra}")
-
-    return "\n".join(lines)
-
-
-def handle_pnl24h() -> None:
-    """/pnl24h — 24h book P&L delta from the cached payload."""
+def handle_book() -> None:
+    """/book — combined holdings + P&L + 24h delta from the cached payload."""
     data = _fetch_latest_score()
     if not data:
-        send("⚠️ /pnl24h unavailable — dashboard hasn't ingested a scoring run "
+        send("⚠️ /book unavailable — dashboard hasn't ingested a scoring run "
              "yet, or auth env vars are missing. Try /status first.")
         return
     try:
-        msg = _format_pnl24h_from_payload(data)
+        msg = _format_book_from_payload(data)
     except Exception as e:
-        logger.warning(f"pnl24h format failed: {e}")
-        msg = f"⚠️ /pnl24h: failed to format ({type(e).__name__}: {e})"
-    send(msg)
-
-
-def handle_pnl() -> None:
-    """/pnl — book-level P&L snapshot from the cached payload."""
-    data = _fetch_latest_score()
-    if not data:
-        send("⚠️ /pnl unavailable — dashboard hasn't ingested a scoring run "
-             "yet, or auth env vars are missing. Try /status first.")
-        return
-    try:
-        msg = _format_pnl_from_payload(data)
-    except Exception as e:
-        logger.warning(f"pnl format failed: {e}")
-        msg = f"⚠️ /pnl: failed to format ({type(e).__name__}: {e})"
+        logger.warning(f"book format failed: {e}")
+        msg = f"⚠️ /book: failed to format ({type(e).__name__}: {e})"
     send(msg)
 
 
@@ -831,11 +726,9 @@ def handle_help() -> None:
     send(
         "🤖 <b>Tao Seeker Commands</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "/status         — run scoring now and send full update\n"
+        "/status         — latest cron snapshot (matches 6h digest)\n"
         "/macro          — show current TAO macro regime\n"
-        "/holdings       — show holdings from chain with health scores\n"
-        "/pnl            — book P&amp;L snapshot per position\n"
-        "/pnl24h         — 24h book P&amp;L delta\n"
+        "/book           — holdings + P&amp;L + 24h delta per position\n"
         "/brief &lt;netuid&gt; — per-subnet quick facts (e.g. /brief 107)\n"
         "/hermes         — calibration report (IC, stability, verdict)\n"
         "/help           — this message\n\n"
@@ -844,13 +737,11 @@ def handle_help() -> None:
 
 
 HANDLERS = {
-    "/status":   handle_status,
-    "/macro":    handle_macro,
-    "/holdings": handle_holdings,
-    "/pnl":      handle_pnl,
-    "/pnl24h":   handle_pnl24h,
-    "/hermes":   handle_hermes,
-    "/help":     handle_help,
+    "/status": handle_status,
+    "/macro":  handle_macro,
+    "/book":   handle_book,
+    "/hermes": handle_hermes,
+    "/help":   handle_help,
 }
 
 
