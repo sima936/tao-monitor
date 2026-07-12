@@ -1931,6 +1931,10 @@ def run(
             for k, v in (locals().get("cost_by_id") or {}).items()
             if v is not None
         }
+        _payload["health_by_netuid"] = {
+            str(int(s.subnet_id)): round(float(s.health_score), 2)
+            for s in (result.ranked_by_health or [])
+        }
         # ─── Hermes-lite calibration report ─────────────────────────────
         # One run per cron. Backfills fwd_returns onto the CSV logs (side
         # effect), computes IC + perturbation-stability, produces a verdict.
