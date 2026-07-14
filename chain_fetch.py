@@ -69,6 +69,25 @@ FALLBACK_ENDPOINTS = ["wss://entrypoint-finney.opentensor.ai:443"]
 #   "other"            -> anything else (decode/unexpected)
 LAST_FAILURE: str = "ok"
 
+# Per-netuid fingerprint from the last successful all_subnets() read.
+# {netuid: {"reg_block": int|None, "owner_coldkey": str|None}}.
+# Populated as a side effect of fetch_all_subnet_metrics_via_chain so callers
+# can diff fingerprints across runs (detects re-registration into an existing
+# slot — the case where set(netuid) is unchanged but the subnet's identity has
+# been replaced). network_registered_at is the definitive signal: monotonic
+# per-subnet, only changes on re-registration. owner_coldkey is stored as a
+# secondary confirmation. Single-threaded cron, plain module state is fine.
+LAST_FINGERPRINTS: dict[int, dict] = {}
+
+
+def get_last_fingerprints() -> dict[int, dict]:
+    """Return the fingerprint map from the last chain metrics fetch.
+
+    Empty {} if no successful fetch has run yet. Values are always fresh
+    dicts, safe to mutate by the caller.
+    """
+    return {int(k): dict(v) for k, v in LAST_FINGERPRINTS.items()}
+
 
 def classify_chain_error(exc: BaseException) -> str:
     """Map a chain-read exception to a coarse reason flag (see LAST_FAILURE)."""
@@ -350,7 +369,14 @@ def _dynamicinfos_to_metrics(subnets):
 def fetch_all_subnet_metrics_via_chain(network: str = DEFAULT_NETWORK):
     """Free subnet metrics (price, pool depth, volume) from ONE all_subnets()
     chain call — same SubnetMetrics list shape as taostats fetch_all_subnet_metrics.
-    Returns None on any failure (or empty) so the caller falls back to taostats."""
+    Returns None on any failure (or empty) so the caller falls back to taostats.
+
+    Side effect: populates the module-level LAST_FINGERPRINTS map with
+    {netuid: {reg_block, owner_coldkey}} extracted from the same DynamicInfo
+    list, so the run_scoring new-subnet detector can spot re-registrations
+    (same netuid, new reg_block) without a second chain call.
+    """
+    global LAST_FINGERPRINTS
     try:
         import bittensor as bt
     except Exception as e:
@@ -362,6 +388,29 @@ def fetch_all_subnet_metrics_via_chain(network: str = DEFAULT_NETWORK):
         sub = bt.Subtensor(network=network, fallback_endpoints=FALLBACK_ENDPOINTS)
         subnets = sub.all_subnets()
         metrics = _dynamicinfos_to_metrics(subnets)
+        # Extract fingerprints from the same DynamicInfo list. Defensive on
+        # every attribute — an SDK version without these fields must not
+        # break the metrics path.
+        fingerprints: dict[int, dict] = {}
+        for di in subnets or []:
+            try:
+                nid = int(di.netuid)
+            except Exception:
+                continue
+            reg_block = None
+            try:
+                _rb = getattr(di, "network_registered_at", None)
+                reg_block = int(_rb) if _rb is not None else None
+            except Exception:
+                reg_block = None
+            owner_ck = None
+            try:
+                _ck = getattr(di, "owner_coldkey", None)
+                owner_ck = str(_ck) if _ck else None
+            except Exception:
+                owner_ck = None
+            fingerprints[nid] = {"reg_block": reg_block, "owner_coldkey": owner_ck}
+        LAST_FINGERPRINTS = fingerprints
     except Exception as e:
         _diag(f"metrics: CHAIN READ FAILED ({type(e).__name__}: {e}) -> falling back")
         import traceback as _tb
