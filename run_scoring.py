@@ -1186,49 +1186,97 @@ def run(
     try:
         current_netuids = {int(m.subnet_id) for m in all_metrics}
         known_netuids = set(prev_state.get("known_netuids") or [])
-        if known_netuids:
-            new_netuids = sorted(current_netuids - known_netuids)
-            if new_netuids and telegram_token and telegram_chat:
-                # Build a rich alert — identity map gives name, url, description,
-                # github. On identity miss, fall back to the on-chain name field
-                # from all_metrics (may be blank/placeholder on day-zero).
-                by_id = {int(m.subnet_id): m for m in all_metrics}
-                lines = ["🆕 NEW SUBNET DETECTED"]
-                for nid in new_netuids[:10]:   # cap in case of a batch
-                    ident = identity_map.get(nid) or {}
-                    name = (ident.get("name") or "").strip()
-                    if not name:
-                        m = by_id.get(nid)
-                        name = (getattr(m, "name", "") or "").strip() or "(unnamed)"
-                    lines.append(f"SN{nid} · {name}")
-                    desc = (ident.get("description") or "").strip()
-                    if desc:
-                        # Trim overly long descriptions — Telegram gets ugly
-                        # past ~140 chars per line.
-                        lines.append(f"   {desc[:140]}")
-                    url = (ident.get("url") or "").strip()
-                    if url:
-                        lines.append(f"   🌐 {_tg_link(url)}")
-                    gh = (ident.get("github") or "").strip()
-                    if gh:
-                        lines.append(f"   💻 {_tg_link(gh)}")
+
+        # ── Set-diff: truly-new netuids (subnet count 129 → 130) ──
+        new_netuids = sorted(current_netuids - known_netuids) if known_netuids else []
+
+        # ── Fingerprint-diff: re-registration into an EXISTING netuid slot ──
+        # Bittensor's register extrinsic reuses the netuid integer of a
+        # deregistered subnet, so set(netuid) is unchanged. The dying subnet
+        # is replaced by a new team + new alpha token at the same UID. The
+        # only chain-observable diff is DynamicInfo.network_registered_at
+        # (monotonic per-subnet, only changes on re-registration). This is
+        # the SN90 KubeTEE case — cascade fired, detector missed it.
+        current_fp: dict[int, dict] = {}
+        try:
+            from chain_fetch import get_last_fingerprints
+            current_fp = get_last_fingerprints() or {}
+        except Exception as _fe:
+            logger.debug(f"fingerprint fetch skipped: {_fe}")
+        known_fp = prev_state.get("known_subnet_fingerprints") or {}
+        rereg_netuids: list[int] = []
+        for nid in sorted(current_fp.keys()):
+            if nid in (new_netuids or []):
+                continue                        # already firing via set-diff
+            curr = current_fp.get(nid) or {}
+            prev = known_fp.get(str(nid)) or {}
+            prev_reg = prev.get("reg_block")
+            curr_reg = curr.get("reg_block")
+            # Only fire when we have BOTH stamps and they differ. First-run
+            # or SDK-missing-field cases stamp silently on this pass, then
+            # fire cleanly on subsequent re-registrations.
+            if prev_reg is not None and curr_reg is not None:
+                try:
+                    if int(prev_reg) != int(curr_reg):
+                        rereg_netuids.append(nid)
+                except Exception:
+                    pass
+
+        combined = sorted(set(new_netuids) | set(rereg_netuids))
+        if combined and telegram_token and telegram_chat:
+            # Build a rich alert — identity map gives name, url, description,
+            # github. On identity miss, fall back to the on-chain name field
+            # from all_metrics (may be blank/placeholder on day-zero).
+            by_id = {int(m.subnet_id): m for m in all_metrics}
+            header = "🆕 NEW SUBNET DETECTED" if not rereg_netuids else "🆕/🔄 SUBNET CHANGE"
+            lines = [header]
+            for nid in combined[:10]:   # cap in case of a batch
+                tag = "🔄 RE-REG" if nid in rereg_netuids else "🆕 NEW"
+                ident = identity_map.get(nid) or {}
+                name = (ident.get("name") or "").strip()
+                if not name:
+                    m = by_id.get(nid)
+                    name = (getattr(m, "name", "") or "").strip() or "(unnamed)"
+                lines.append(f"{tag} SN{nid} · {name}")
+                desc = (ident.get("description") or "").strip()
+                if desc:
+                    # Trim overly long descriptions — Telegram gets ugly
+                    # past ~140 chars per line.
+                    lines.append(f"   {desc[:140]}")
+                url = (ident.get("url") or "").strip()
+                if url:
+                    lines.append(f"   🌐 {_tg_link(url)}")
+                gh = (ident.get("github") or "").strip()
+                if gh:
+                    lines.append(f"   💻 {_tg_link(gh)}")
+            if new_netuids:
                 lines.append(f"Total: {len(known_netuids)} → {len(current_netuids)}")
-                _check_url = f"https://tao.app/subnets/{new_netuids[0]}"
-                lines.append(f"Check: {_tg_link(_check_url)}")
-                send_telegram("\n".join(lines), telegram_token, telegram_chat)
-                logger.warning(f"NEW SUBNETS: {new_netuids}")
+            _check_url = f"https://tao.app/subnets/{combined[0]}"
+            lines.append(f"Check: {_tg_link(_check_url)}")
+            send_telegram("\n".join(lines), telegram_token, telegram_chat)
+            logger.warning(f"SUBNET CHANGE: new={new_netuids} rereg={rereg_netuids}")
         # Persist current set for next-run comparison (JSON stringifies ints
         # fine; sorted list keeps the file diff-friendly).
         prev_state["known_netuids"] = sorted(current_netuids)
+        # Persist fingerprints for next-run re-registration detection.
+        prev_state["known_subnet_fingerprints"] = {
+            str(int(k)): v for k, v in current_fp.items()
+        }
         # First-seen timestamps for LAUNCH_SCOUT window detection. Only stamp
         # NEWLY-appearing netuids so legacy state stays out of the window.
         # Existing netuids without a stamp will never qualify for launch_scout
         # (correct — they existed before we started tracking).
+        # ALSO refresh first_seen for re-registered netuids — the new subnet
+        # at that UID is genuinely fresh, and LAUNCH_SCOUT should treat it
+        # as such (< 7d window resets).
         first_seen = dict(prev_state.get("known_netuids_first_seen") or {})
+        _now_ts = time.time()
         for nid in current_netuids:
             key = str(int(nid))
             if key not in first_seen:
-                first_seen[key] = time.time()
+                first_seen[key] = _now_ts
+        for nid in rereg_netuids:
+            first_seen[str(int(nid))] = _now_ts   # reset — new subnet at this UID
         prev_state["known_netuids_first_seen"] = first_seen
     except Exception as e:
         logger.warning(f"New-subnet detector skipped: {e}")
@@ -1930,10 +1978,6 @@ def run(
             str(int(k)): float(v)
             for k, v in (locals().get("cost_by_id") or {}).items()
             if v is not None
-        }
-        _payload["health_by_netuid"] = {
-            str(int(s.subnet_id)): round(float(s.health_score), 2)
-            for s in (result.ranked_by_health or [])
         }
         # ─── Hermes-lite calibration report ─────────────────────────────
         # One run per cron. Backfills fwd_returns onto the CSV logs (side
