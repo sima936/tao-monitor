@@ -1494,11 +1494,16 @@ def run(
                 for m in ranked[:10]:
                     nid = int(m.subnet_id)
                     curr_ma = float(m.moving_price)
-                    prev_entry = vol_last.get(str(nid)) or {}
-                    prev_ma = float(prev_entry.get("ma") or 0.0)
-                    last_vol_alert = float(prev_entry.get("ts") or 0.0)
+                    prev_entry = vol_last.get(str(nid))
+                    never_seen = prev_entry is None
+                    prev_ma = float((prev_entry or {}).get("ma") or 0.0)
+                    last_vol_alert = float((prev_entry or {}).get("ts") or 0.0)
                     fire = False
-                    if (now_ts - last_vol_alert) >= VOL_RATE_LIMIT_S:
+                    # Never-seen: just record baseline, do NOT alert (was
+                    # the first-cron flood bug — 10 false positives on
+                    # deploy because .get(...) or 0.0 conflated missing
+                    # state with genuine dormancy).
+                    if not never_seen and (now_ts - last_vol_alert) >= VOL_RATE_LIMIT_S:
                         if prev_ma == 0 and curr_ma >= VOL_MA_DELTA:
                             fire = True   # first-tick from dead
                         elif prev_ma > 0 and (curr_ma - prev_ma) >= VOL_MA_DELTA:
