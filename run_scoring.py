@@ -1467,6 +1467,79 @@ def run(
                 else:
                     _diag("dereg", f"quiet — bottom3: {bottom3}")
 
+            # ─── Watchlist volatility alert ─────────────────────────────
+            # SN90 case (30 July 2026): MA jumped 0.0000 → 0.0007τ and
+            # price ripped 1.25 → 3.49 (+154%) overnight while still on
+            # the dereg watchlist. Existing alert only fires on rank +
+            # rate-limits daily — we caught the move manually 6h late.
+            #
+            # This block scans the top 10 dereg candidates each cron and
+            # emits a distinct 🚨 alert when MA shows sudden inflow:
+            #   • first-tick:  prev_ma == 0 and curr_ma ≥ threshold
+            #                   (dead subnet starting to emit — SN90 case)
+            #   • delta jump:  curr_ma - prev_ma ≥ threshold
+            #                   (MA climbing fast — subsequent moves)
+            #
+            # Rate-limited 6h per netuid (shorter than the 24h dereg
+            # rate limit — these are time-sensitive).
+            #
+            # State rebuilt fresh each cycle from currently-tracked
+            # top 10 so stale entries never accumulate.
+            try:
+                VOL_MA_DELTA = 0.0005      # τ — SN90 moved +0.0007
+                VOL_RATE_LIMIT_S = 6 * 3600
+                vol_last = prev_state.get("watchlist_last_ma") or {}
+                vol_fires: list[tuple[int, str, float, float]] = []
+                new_vol_last: dict = {}
+                for m in ranked[:10]:
+                    nid = int(m.subnet_id)
+                    curr_ma = float(m.moving_price)
+                    prev_entry = vol_last.get(str(nid)) or {}
+                    prev_ma = float(prev_entry.get("ma") or 0.0)
+                    last_vol_alert = float(prev_entry.get("ts") or 0.0)
+                    fire = False
+                    if (now_ts - last_vol_alert) >= VOL_RATE_LIMIT_S:
+                        if prev_ma == 0 and curr_ma >= VOL_MA_DELTA:
+                            fire = True   # first-tick from dead
+                        elif prev_ma > 0 and (curr_ma - prev_ma) >= VOL_MA_DELTA:
+                            fire = True   # MA climbing fast
+                    if fire:
+                        name = (getattr(m, "name", "") or "").strip() or f"SN{nid}"
+                        ident = identity_map.get(nid) or {}
+                        display_name = (ident.get("name") or "").strip() or name
+                        vol_fires.append((nid, display_name, prev_ma, curr_ma))
+                        new_vol_last[str(nid)] = {"ma": curr_ma, "ts": now_ts}
+                    else:
+                        new_vol_last[str(nid)] = {"ma": curr_ma, "ts": last_vol_alert}
+
+                if vol_fires and telegram_token and telegram_chat:
+                    lines = ["🚨 WATCHLIST VOLATILITY"]
+                    for nid, dname, prev_ma, curr_ma in vol_fires:
+                        if prev_ma > 0:
+                            pct = (curr_ma - prev_ma) / prev_ma * 100.0
+                            pct_str = f"(+{pct:.0f}%)"
+                        else:
+                            pct_str = "(from zero — activity started)"
+                        lines.append(
+                            f"⚡ SN{nid} · {dname} — MA "
+                            f"{prev_ma:.4f}τ → {curr_ma:.4f}τ {pct_str}"
+                        )
+                    lines.append("Dereg candidate showing capital inflow — check chart")
+                    _tao_url = f"https://tao.app/subnets/{vol_fires[0][0]}"
+                    lines.append(_tg_link(
+                        _tao_url,
+                        display=f"tao.app/subnets/{vol_fires[0][0]}",
+                    ))
+                    send_telegram("\n".join(lines), telegram_token, telegram_chat)
+                    _diag("watchlist_vol",
+                          f"fired: {[(n, f'{p:.4f}→{c:.4f}') for n, _, p, c in vol_fires]}")
+                    logger.warning(f"WATCHLIST VOLATILITY: {vol_fires}")
+
+                prev_state["watchlist_last_ma"] = new_vol_last
+            except Exception as _vol_e:
+                _diag("watchlist_vol", f"SKIPPED ({type(_vol_e).__name__}: {_vol_e})")
+                logger.warning(f"Watchlist volatility detector skipped: {_vol_e}")
+
             # Persist for next cycle
             prev_state["dereg_watchlist"] = [
                 {"netuid": int(m.subnet_id), "rank": current_ranks[int(m.subnet_id)],
