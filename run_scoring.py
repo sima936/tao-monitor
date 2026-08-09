@@ -1800,11 +1800,56 @@ def run(
         health_by_id = {s.subnet_id: float(s.health_score) for s in eligible_scored}
         cost_by_id   = {int(k): float(v.get("tao_invested", 0) or 0)
                         for k, v in ((cb or {}).get("positions", {}) or {}).items()}
+        # Intra-cron 24h high/low for held positions (added 2026-08-09).
+        # Fixes the "6h cron misses wicks" resolution gap — the SN90 case:
+        # a 15-min wick to 4.24 between two cron samples never breached the
+        # trail because both samples showed prices above the trigger. The
+        # taostats pool/latest endpoint returns highest_price_24_hr and
+        # lowest_price_24_hr; we fetch them just for HELD positions (typically
+        # 3-5 subnets = 3-5 API calls, ~1-2s at 0.5s taostats delay), then
+        # hand them to evaluate_stops which raises the peak with the wick high
+        # and measures drawdown against the wick low. Wrapped: any fetch
+        # failure degrades cleanly to prior close-only behaviour.
+        high_by_id: dict = {}
+        low_by_id: dict = {}
+        try:
+            held_netuids = [int(h) for h in holdings if int(h) != 0]
+            for nid in held_netuids:
+                try:
+                    pool = client.get_pool(nid)
+                except Exception as _fetch_e:
+                    _diag("tp_cl", f"hl fetch SN{nid} SKIPPED "
+                          f"({type(_fetch_e).__name__}: {_fetch_e})")
+                    continue
+                if not pool:
+                    continue
+                hi = pool.get("highest_price_24_hr")
+                lo = pool.get("lowest_price_24_hr")
+                try:
+                    hi_f = float(hi) if hi is not None else None
+                    lo_f = float(lo) if lo is not None else None
+                except (TypeError, ValueError):
+                    hi_f = lo_f = None
+                if hi_f and hi_f > 0:
+                    high_by_id[nid] = hi_f
+                if lo_f and lo_f > 0:
+                    low_by_id[nid] = lo_f
+            if high_by_id or low_by_id:
+                _diag("tp_cl", "hl24 | " + " ".join(
+                    f"SN{n}=hi{high_by_id.get(n, '?')}/lo{low_by_id.get(n, '?')}"
+                    for n in sorted(set(high_by_id) | set(low_by_id))
+                ))
+        except Exception as _hl_e:
+            _diag("tp_cl", f"hl24 block SKIPPED "
+                  f"({type(_hl_e).__name__}: {_hl_e})")
+            high_by_id = {}
+            low_by_id = {}
         stop_events, peak_out, fired_out = evaluate_stops(
             holdings, price_by_id, (bal_by_netuid or {}), cost_by_id,
             pnl_by_netuid, regime_by_id, health_by_id, name_by_id,
             prev_state.get("peak_price") or {}, prev_state.get("stop_fired") or {},
             trail_pct=TRAIL_PCT, stop_pct=STOP_PCT, now_ts=time.time(),
+            high_by_id=high_by_id, low_by_id=low_by_id,
         )
         prev_state["peak_price"] = {str(k): v for k, v in peak_out.items()}
         prev_state["stop_fired"] = {str(k): v for k, v in fired_out.items()}
