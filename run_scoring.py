@@ -1821,19 +1821,27 @@ def run(
         # between runs; this lands in the Deployments log). Confirms trailing-
         # stop peaks persist + build over cycles, and shows the stop_fired latch
         # per held name. Hard stop is live cycle-one; trailing builds gradually.
+        #
+        # 2026-08-09: switched from logger.info -> _diag. logger.info is not
+        # landing in Railway capture (Bittensor SDK filter — see LS37 note on
+        # the logger hijack). _diag routes via stderr and reliably reaches the
+        # Deployments log. Needed to diagnose whether SN90's 7 Aug wick to
+        # 4.24 was silently latch-suppressed or a peak-tracking bug.
         if peak_out:
-            logger.info(
-                "TP/CL state | peaks=%d latched=%d | %s",
-                len(peak_out), len(fired_out),
-                " ".join(
-                    f"SN{nid}={price_by_id.get(nid, 0.0):.6f}/pk{pk:.6f}"
-                    f"({(price_by_id.get(nid, 0.0) / pk - 1) * 100:+.1f}%"
-                    f"{',FIRED:' + str(fired_out[nid]) if nid in fired_out else ''})"
-                    for nid, pk in sorted(peak_out.items()) if pk
+            _diag(
+                "tp_cl",
+                "state | peaks={} latched={} | {}".format(
+                    len(peak_out), len(fired_out),
+                    " ".join(
+                        f"SN{nid}={price_by_id.get(nid, 0.0):.6f}/pk{pk:.6f}"
+                        f"({(price_by_id.get(nid, 0.0) / pk - 1) * 100:+.1f}%"
+                        f"{',FIRED:' + str(fired_out[nid]) if nid in fired_out else ''})"
+                        for nid, pk in sorted(peak_out.items()) if pk
+                    ),
                 ),
             )
         else:
-            logger.info("TP/CL state | no peaks yet (seeding at this cycle's prices)")
+            _diag("tp_cl", "state | no peaks yet (seeding at this cycle's prices)")
         if stop_events:
             append_outcome_log(stop_events)
             logger.warning("STOPS FIRED: " + " | ".join(
