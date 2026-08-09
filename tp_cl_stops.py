@@ -353,8 +353,13 @@ def evaluate_tp_trims(
     for nid, rec in entries.items():
         if int(nid) in skip:
             continue
-        if not rec.get("launch_scout"):
-            continue
+        # NOTE (2026-08-09): launch_scout gate REMOVED. Was blocking
+        # outcome_log rows on established positions (e.g. SN90 22d after
+        # reg + entry >1τ) that crossed +50%/+100% but never wrote events
+        # for Hermes to score. First fix: emit for ALL held positions so
+        # the ladder becomes a general harvest signal, not a scout-only
+        # one. Alert routing in run_scoring.py is unchanged — see the
+        # send_telegram call there if we later want to gate on scout-only.
         pnl = pnl_by_id.get(nid)
         if pnl is None:
             continue                 # can't evaluate without cost basis this cycle
@@ -382,7 +387,7 @@ def evaluate_tp_trims(
                     "fwd_return_14d": "",
                     "trim_rung_pct": rung,
                     "trim_size_tao": round(trim_tao, 6),
-                    "is_launch_scout": 1,
+                    "is_launch_scout": int(bool(rec.get("launch_scout"))),
                 })
                 already.add(rung)
         rec["trims_fired"] = sorted(already)
