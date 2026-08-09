@@ -100,15 +100,30 @@ def evaluate_stops(
     stop_pct: float = STOP_PCT,
     skip_ids=(0,),            # SN0 root / cash leg
     now_ts: float | None = None,
+    high_by_id: dict | None = None,  # {netuid: intra-cron 24h high} — optional
+    low_by_id: dict | None = None,   # {netuid: intra-cron 24h low}  — optional
 ):
     """Pure stop calc. Returns (events, new_peak_price, new_stop_fired).
 
     Inputs are not mutated — copies are returned so the caller persists them to
     state. `events` is a list of outcome-log rows ready for append_outcome_log.
+
+    Resolution note (added 2026-08-09):
+      When high_by_id / low_by_id are provided (from taostats
+      highest_price_24_hr / lowest_price_24_hr on the pool/latest endpoint),
+      the peak update uses the intra-cron HIGH and the drawdown check uses the
+      intra-cron LOW. This closes the gap where a 15-min wick between two 6h
+      crons was invisible to the framework (SN90 4.24 wick on 7 Aug — 31%
+      drawdown from 6.15 peak, never caught because both sample points were
+      above the trail line).
+      When the dicts are absent the function behaves as before — same cron-
+      sample-only logic, no resolution improvement but also no regression.
     """
     now_ts = now_ts if now_ts is not None else time.time()
     held = [h for h in holdings if h not in set(skip_ids)]
     held_set = set(held)
+    high_by_id = high_by_id or {}
+    low_by_id = low_by_id or {}
 
     # Start from prior state, but prune anything no longer held so re-entry
     # starts with a fresh high-water and no stale latch.
@@ -122,12 +137,23 @@ def evaluate_stops(
         if not price or price <= 0:
             continue  # no real price this cycle — leave peak/latch untouched
 
-        # High-water update (per-unit peak — invariant to adds/trims).
-        cur_peak = max(peak.get(h, price), price)
+        # High-water update — take the intra-cron 24h high when available so a
+        # wick that spiked between crons still lifts the peak. Falls through to
+        # current price when high not supplied (identical to prior behaviour).
+        h24 = high_by_id.get(h)
+        peak_candidate = max(price, float(h24)) if (h24 and h24 > 0) else price
+        cur_peak = max(peak.get(h, peak_candidate), peak_candidate)
         peak[h] = cur_peak
 
+        # Drawdown check — use the intra-cron 24h LOW when available so a wick
+        # that dumped between crons and recovered by sample-time still fires.
+        # This is the SN90 4.24 case: current price 5.50, but 24h low 4.24 → dd
+        # measured against 4.24, not 5.50.
+        l24 = low_by_id.get(h)
+        dd_price = min(price, float(l24)) if (l24 and l24 > 0) else price
+
         pnl = pnl_by_id.get(h)
-        trail_dd = (cur_peak - price) / cur_peak if cur_peak else 0.0
+        trail_dd = (cur_peak - dd_price) / cur_peak if cur_peak else 0.0
         trail_breach = trail_dd >= trail_pct
         hard_breach = (pnl is not None) and (pnl <= -stop_pct)
 
