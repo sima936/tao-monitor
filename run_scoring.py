@@ -78,6 +78,7 @@ from subnet_allocation import (
     AllocationPolicy,
     format_allocation_plan,
     format_actionable_digest,
+    worst_rolling_drawdown_pct,
 )
 from spot_price import get_tao_prices
 from geckoterminal_fetch import fetch_history_for_netuids
@@ -1966,6 +1967,46 @@ def run(
 
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
     _fundamentals = load_fundamentals()
+
+    # ── Per-subnet worst rolling drawdown → drives the fixed-fractional risk
+    #    cap (Unger-style). Read directly from the SQLite price-history store
+    #    so we don't depend on price_history being carried onto SubnetScore.
+    #    SHADOW-mode default in AllocationPolicy — the diagnostic surfaces in
+    #    plan.notes without applying, so a few cycles of forward data validate
+    #    the sizing shift before we flip RISK_CAP_ENABLED=1 on Railway.
+    #    Fully guarded — a store failure just leaves the dict empty and the
+    #    allocator falls through to `risk_cap_fallback_worst_loss`. ─────────
+    worst_dd_by_id: dict[int, float] = {}
+    try:
+        from subnet_price_history import get_bars as _ph_get_bars
+        _dd_window = int(os.environ.get("RISK_CAP_DD_WINDOW_DAYS", "3"))
+        _dd_lookback = int(os.environ.get("RISK_CAP_HISTORY_LOOKBACK_BARS", "45"))
+        _dd_min_bars = int(os.environ.get("RISK_CAP_MIN_HISTORY_BARS", "10"))
+        _dd_hits = 0
+        _dd_misses = 0
+        for _s in eligible_scored:
+            _sid = int(getattr(_s, "subnet_id", -1))
+            if _sid <= 0:
+                continue
+            try:
+                _closes, _ = _ph_get_bars(_sid, limit=_dd_lookback)
+            except Exception:
+                _closes = []
+            if len(_closes) < _dd_min_bars:
+                _dd_misses += 1
+                continue
+            _dd = worst_rolling_drawdown_pct(_closes, window=_dd_window)
+            if _dd > 0.0:
+                worst_dd_by_id[_sid] = _dd
+                _dd_hits += 1
+            else:
+                _dd_misses += 1
+        _diag("risk_cap", f"worst_dd hits={_dd_hits} misses={_dd_misses} "
+              f"window={_dd_window}d lookback={_dd_lookback}bars")
+    except Exception as _dde:
+        _diag("risk_cap", f"worst_dd SKIPPED ({type(_dde).__name__}: {_dde}) — "
+              f"allocator falls back to fallback_worst_loss")
+
     plan = compute_target_allocation(
         eligible_scored,                        # real-data survivors, sized off health_score
         result.macro,
@@ -1975,6 +2016,7 @@ def run(
         now_ts=time.time(),
         force_exit=force_exit,                   # STEP 2 — stops override floor + gate
         fundamentals=_fundamentals,              # #3 — AVOID verdict caps ADDs/entries
+        worst_dd_by_id=worst_dd_by_id,           # Unger risk cap — SHADOW by default
     )
     # Persist the updated confirmation streak for the next cron. JSON stringifies
     # int keys, so they're coerced back to int on load (cut_since_in above).
