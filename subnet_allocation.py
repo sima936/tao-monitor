@@ -35,12 +35,81 @@ Roan (@RohOnChain) Markov macro. Not financial advice.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional, Iterable, TYPE_CHECKING
 
 if TYPE_CHECKING:  # avoid a hard import cycle; runtime is pure duck-typing
     from subnet_scoring_engine import SubnetScore, TaoMacroState
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixed-fractional risk cap (Unger-style, added 2026-08-15)
+# ─────────────────────────────────────────────────────────────────────────────
+# Per Unger's method: each position risks a fixed % of book (default 1%) based
+# on the assumed worst-case loss for that position. The cap is:
+#
+#   target_weight ≤ risk_budget_per_position / worst_case_loss_pct
+#
+# where worst_case_loss_pct = max(subnet's own historical rolling drawdown over
+# `dd_window` days, a floor derived from STOP_PCT / trail slippage).
+#
+# SHADOW by default: computes what it WOULD cap but doesn't apply — logs to
+# allocation.notes so a few cycles of forward data can be inspected before it
+# starts binding. Flip RISK_CAP_ENABLED=1 (or edit AllocationPolicy) to activate.
+#
+# Env-tunable per Simon's calibration authority; the values fold into
+# strategy.yaml's `risk_management` block once Hermes owns the surface.
+# ─────────────────────────────────────────────────────────────────────────────
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.environ.get(key)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_RISK_CAP_ENABLED = _env_bool("RISK_CAP_ENABLED", False)
+_RISK_BUDGET_PER_POSITION = float(os.environ.get("RISK_BUDGET_PER_POSITION", "0.01"))
+_RISK_CAP_FALLBACK_WORST_LOSS = float(
+    os.environ.get("RISK_CAP_FALLBACK_WORST_LOSS", "0.30")
+)
+_RISK_CAP_DD_WINDOW_DAYS = int(os.environ.get("RISK_CAP_DD_WINDOW_DAYS", "3"))
+_RISK_CAP_MIN_HISTORY_BARS = int(os.environ.get("RISK_CAP_MIN_HISTORY_BARS", "10"))
+
+
+def worst_rolling_drawdown_pct(prices: list, window: int = 3) -> float:
+    """Worst peak-to-trough drawdown inside any `window`-bar rolling window.
+
+    Returns a fraction (0.0 - 1.0). Uses rolling windows rather than the whole
+    series so a single old crash episode doesn't dominate — this is a
+    per-stop-holding-period risk estimate, not lifetime max DD. Bar cadence is
+    whatever the caller feeds in (typically daily); `window=3` on daily bars
+    reads "the worst 3-day drawdown seen in this history".
+
+    Empty / too-short / all-zero series → 0.0. Never negative.
+    """
+    if not prices or len(prices) < 2:
+        return 0.0
+    prices = [float(p) for p in prices if p and p > 0]
+    if len(prices) < 2:
+        return 0.0
+    window = max(2, int(window))
+    worst = 0.0
+    for i in range(len(prices)):
+        end = min(len(prices), i + window)
+        win = prices[i:end]
+        if len(win) < 2:
+            continue
+        peak = win[0]
+        for p in win[1:]:
+            if p > peak:
+                peak = p
+            elif peak > 0:
+                dd = (peak - p) / peak
+                if dd > worst:
+                    worst = dd
+    return worst
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +227,19 @@ class AllocationPolicy:
     confirm_hours: float = 18.0
     confirm_gates: frozenset = frozenset({"bear_regime", "health_below_floor"})
 
+    # ── Fixed-fractional risk cap (Unger-style, added 2026-08-15).
+    #    Caps target_weight per position at risk_budget / worst_case_loss so no
+    #    single position can lose more than `risk_budget_per_position` of the
+    #    account if its stop fires. See module-level notes for the derivation.
+    #    SHADOW by default — logs would-cap in allocation.notes without applying,
+    #    so a few cycles of forward data validate the sizing shift before it
+    #    binds. Flip risk_cap_enabled=True (or RISK_CAP_ENABLED=1) to activate.
+    risk_cap_enabled: bool = _RISK_CAP_ENABLED
+    risk_budget_per_position: float = _RISK_BUDGET_PER_POSITION
+    risk_cap_fallback_worst_loss: float = _RISK_CAP_FALLBACK_WORST_LOSS
+    risk_cap_dd_window_days: int = _RISK_CAP_DD_WINDOW_DAYS
+    risk_cap_min_history_bars: int = _RISK_CAP_MIN_HISTORY_BARS
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Outputs
@@ -268,6 +350,7 @@ def compute_target_allocation(
     now_ts: Optional[float] = None,                     # wall-clock epoch; enables time-confirmation
     force_exit: Optional[dict] = None,                  # {sid: "trail_stop"/"hard_stop"} — STEP 2 stop override
     fundamentals: Optional[dict] = None,                # {sid: record|verdict} — #3: AVOID caps ADDs/entries
+    worst_dd_by_id: Optional[dict] = None,              # {sid: worst rolling drawdown fraction} for risk cap
 ) -> AllocationPlan:
     """Derive the target allocation.
 
@@ -512,6 +595,55 @@ def compute_target_allocation(
                         weights[sid] = pool_cap_w
         else:
             notes.append("Pool cap skipped (no account_tao supplied) — non-binding at current size anyway.")
+
+        # ── Fixed-fractional risk cap (Unger-style, added 2026-08-15) ────────
+        # cap: target_weight × worst_case_loss ≤ risk_budget → target ≤ B / L.
+        # worst_case_loss = max(subnet's own rolling worst DD from history,
+        # fallback). Shadow mode logs the would-cap without applying so a few
+        # cycles of forward data validate the sizing shift before it binds.
+        dd_lookup = {int(k): float(v) for k, v in (worst_dd_by_id or {}).items()}
+        risk_shadow: list[tuple] = []
+        risk_bound: list[tuple] = []
+        for s, tier, _, _ in survivors:
+            sid = int(getattr(s, "subnet_id"))
+            realized_dd = dd_lookup.get(sid, 0.0)
+            history_ok = realized_dd > 0.0
+            worst_case = max(realized_dd, policy.risk_cap_fallback_worst_loss)
+            if worst_case <= 0:
+                continue
+            risk_cap_w = policy.risk_budget_per_position / worst_case
+            cur_w = weights[sid]
+            if cur_w > risk_cap_w:
+                source = "hist" if history_ok else "fallback"
+                if policy.risk_cap_enabled:
+                    weights[sid] = risk_cap_w
+                    capped_flags[sid] = "risk"
+                    risk_bound.append((sid, getattr(s, "name", ""), cur_w, risk_cap_w, worst_case, source))
+                else:
+                    risk_shadow.append((sid, getattr(s, "name", ""), cur_w, risk_cap_w, worst_case, source))
+
+        if risk_bound:
+            items = "; ".join(
+                f"SN{sid} {nm}: {cur:.1%}→{cap:.1%} (worst {wc:.0%}, {src})"
+                for sid, nm, cur, cap, wc, src in risk_bound[:5]
+            )
+            more = "" if len(risk_bound) <= 5 else f" +{len(risk_bound) - 5} more"
+            notes.append(
+                f"🛡️ Risk cap [LIVE] — {len(risk_bound)} name(s) sized down "
+                f"to keep per-position loss ≤ {policy.risk_budget_per_position:.1%} of book: "
+                f"{items}{more}"
+            )
+        elif risk_shadow:
+            items = "; ".join(
+                f"SN{sid} {nm}: {cur:.1%}→{cap:.1%} (worst {wc:.0%}, {src})"
+                for sid, nm, cur, cap, wc, src in risk_shadow[:5]
+            )
+            more = "" if len(risk_shadow) <= 5 else f" +{len(risk_shadow) - 5} more"
+            notes.append(
+                f"🛡️ Risk cap [SHADOW] — {len(risk_shadow)} name(s) WOULD cap "
+                f"at {policy.risk_budget_per_position:.1%}/position (not applied — set "
+                f"RISK_CAP_ENABLED=1 to activate): {items}{more}"
+            )
 
         # Any weight removed by caps simply stays in SN0 (conservative; can be
         # redistributed to uncapped greens in a later refinement).
