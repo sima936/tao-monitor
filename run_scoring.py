@@ -726,6 +726,30 @@ WATCHLIST = [3]            # SN3 Teutonic — always enriched even if not held
 CAND_MIN_POOL = 50.0       # TAO — skip illiquid pools when picking candidates
 CAND_MAX_PRICE = 0.10      # TAO — skip very expensive tokens when picking candidates
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchlist price alerts (added 2026-08-15)
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-held enrichment-watchlist subnets get scanned each cron for large ±24h
+# moves or intraday wicks. Distinct from WATCHLIST_VOLATILITY (which only
+# fires on dereg-candidate MA inflow — SN90 revival case). This is for
+# healthy subnets we're tracking that could pump OR dump — a big drop is
+# also an entry opportunity. Missed SN3 Teutonic +30% on 2026-08-15; this
+# closes that gap.
+# Env-tunable; default set = SN3 (Teutonic), SN16 (pre-research), SN70
+# (post-reg cascade watch), SN78 (Vocence — today's dereg watchlist entry).
+# Pure trigger logic lives in watchlist_price.py so it's unit-testable
+# without pulling the bittensor/taostats stack.
+from watchlist_price import evaluate_price_alert as _evaluate_price_alert
+
+PRICE_ALERT_WATCHLIST = [
+    int(x.strip()) for x in os.environ.get(
+        "PRICE_ALERT_WATCHLIST", "3,16,70,78"
+    ).split(",") if x.strip()
+]
+PRICE_ALERT_PCT_24H = float(os.environ.get("PRICE_ALERT_PCT_24H", "0.15"))
+PRICE_ALERT_WICK_PCT = float(os.environ.get("PRICE_ALERT_WICK_PCT", "0.20"))
+PRICE_ALERT_RATE_LIMIT_S = int(os.environ.get("PRICE_ALERT_RATE_LIMIT_S", str(6 * 3600)))
+
 
 def _recent_7d_change(m) -> float:
     """Real 7d move from the (anchored) price series; -inf if unknown.
@@ -1571,7 +1595,8 @@ def run(
     # keeps the original holdings-only behaviour; > 0 broadens to holdings +
     # watchlist + the strongest 7d movers among liquid, sanely-priced pools.
     if candidate_budget > 0:
-        targets = select_candidates(all_metrics, holdings, WATCHLIST, candidate_budget)
+        _enrich_list = sorted(set(WATCHLIST) | set(PRICE_ALERT_WATCHLIST))
+        targets = select_candidates(all_metrics, holdings, _enrich_list, candidate_budget)
         logger.info(f"Enrichment targets ({len(targets)}): {targets}")
     else:
         targets = list(holdings)
@@ -1964,7 +1989,112 @@ def run(
         except Exception as e:
             _diag("tp_cl", f"SKIPPED ({type(e).__name__}: {e})")
             logger.warning(f"LAUNCH_SCOUT / TP_TRIM block skipped: {e}")
+    # ── Watchlist price alerts ─────────────────────────────────────────────
+    # Non-held enrichment-watchlist names scanned for large ±24h moves or
+    # intraday wicks. Missed SN3 Teutonic +30% on 2026-08-15 — this closes
+    # the gap. Rate-limited per direction (6h up, 6h down) so a sustained
+    # pump doesn't spam AND a subsequent dump still fires. Guarded — cron
+    # never dies here. Held names skipped (TP/CL handles those).
+    try:
+        _pa_state = {
+            str(k): dict(v)
+            for k, v in (prev_state.get("watchlist_price_last_alert") or {}).items()
+        }
+        _pa_new_state = dict(_pa_state)
+        _pa_up: list[tuple] = []
+        _pa_down: list[tuple] = []
+        _now = time.time()
+        _held_set = {int(h) for h in (holdings or [])}
+        _scored_by_id = {int(s.subnet_id): s for s in eligible_scored}
+        try:
+            from subnet_price_history import get_bars as _pa_get_bars
+        except Exception:
+            _pa_get_bars = None
+        for _nid in PRICE_ALERT_WATCHLIST:
+            if _nid <= 0 or _nid in _held_set:
+                continue
+            _s = _scored_by_id.get(_nid)
+            if _s is None:
+                # Watchlist name wasn't scored this cron (didn't make the
+                # enrichment set) — skip quietly rather than fabricate.
+                continue
+            _pct24 = getattr(_s, "pct_change_24h", None)
+            # 24h high/low from taostats — mirrors the held-position hl24 fetch.
+            _hi = _lo = 0.0
+            try:
+                _pool_info = client.get_pool(_nid)
+                _hi = float(_pool_info.get("highest_price_24_hr") or 0)
+                _lo = float(_pool_info.get("lowest_price_24_hr") or 0)
+            except Exception:
+                pass
+            # Prev close from price-history store (SubnetScore doesn't carry it).
+            _prev_close = 0.0
+            if _pa_get_bars is not None:
+                try:
+                    _closes, _ = _pa_get_bars(_nid, limit=3)
+                    if len(_closes) >= 2 and _closes[-2] > 0:
+                        _prev_close = float(_closes[-2])
+                except Exception:
+                    pass
+            _up_wick = ((_hi - _prev_close) / _prev_close) if (_hi > 0 and _prev_close > 0) else 0.0
+            _down_wick = ((_prev_close - _lo) / _prev_close) if (_lo > 0 and _prev_close > 0) else 0.0
+            _state = _pa_state.get(str(_nid)) or {}
+            _fire_up, _fire_down, _new_up_ts, _new_down_ts = _evaluate_price_alert(
+                _pct24, _up_wick, _down_wick,
+                float(_state.get("up_ts") or 0), float(_state.get("down_ts") or 0),
+                _now, PRICE_ALERT_PCT_24H, PRICE_ALERT_WICK_PCT, PRICE_ALERT_RATE_LIMIT_S,
+            )
+            if _fire_up:
+                _pa_up.append((_nid, _s, _pct24, _up_wick, _hi, _prev_close))
+            if _fire_down:
+                _pa_down.append((_nid, _s, _pct24, _down_wick, _lo, _prev_close))
+            _pa_new_state[str(_nid)] = {
+                "up_ts": _new_up_ts,
+                "down_ts": _new_down_ts,
+            }
 
+        if (_pa_up or _pa_down) and telegram_token and telegram_chat:
+            _lines = ["🚨 WATCHLIST PRICE MOVE", ""]
+            for _nid, _s, _pct24, _wick, _hi, _prev in _pa_up:
+                _wick_txt = (
+                    f"wick +{_wick * 100:.1f}% to {_hi:.4f}τ"
+                    if _wick > 0 else "up move"
+                )
+                _lines.append(
+                    f"🟦 SN{_nid} · {getattr(_s, 'name', '')} — {_wick_txt} "
+                    f"(prior close {_prev:.4f}τ)"
+                )
+                if _pct24 is not None:
+                    _lines.append(f"   24h: {_pct24 * 100:+.1f}% · "
+                                  f"regime {getattr(_s, 'markov_regime', '?')}")
+            for _nid, _s, _pct24, _wick, _lo, _prev in _pa_down:
+                _wick_txt = (
+                    f"wick -{_wick * 100:.1f}% to {_lo:.4f}τ"
+                    if _wick > 0 else "down move"
+                )
+                _lines.append(
+                    f"⬇️ SN{_nid} · {getattr(_s, 'name', '')} — {_wick_txt} "
+                    f"(prior close {_prev:.4f}τ)"
+                )
+                if _pct24 is not None:
+                    _lines.append(f"   24h: {_pct24 * 100:+.1f}% · "
+                                  f"regime {getattr(_s, 'markov_regime', '?')}")
+            _first_nid = (_pa_up + _pa_down)[0][0]
+            _lines.append("")
+            _lines.append(f"tao.app/subnets/{_first_nid}")
+            send_telegram("\n".join(_lines), telegram_token, telegram_chat)
+            _diag("watchlist_price",
+                  f"fired up={[(n, f'{w * 100:.1f}%') for n, _, _, w, _, _ in _pa_up]} "
+                  f"down={[(n, f'{w * 100:.1f}%') for n, _, _, w, _, _ in _pa_down]}")
+            logger.warning(f"WATCHLIST PRICE: up={len(_pa_up)} down={len(_pa_down)}")
+        else:
+            _diag("watchlist_price",
+                  f"quiet — checked {len(PRICE_ALERT_WATCHLIST)} watchlist name(s)")
+
+        prev_state["watchlist_price_last_alert"] = _pa_new_state
+    except Exception as _pae:
+        _diag("watchlist_price", f"SKIPPED ({type(_pae).__name__}: {_pae})")
+        logger.warning(f"Watchlist price alert skipped: {_pae}")
     cut_since_in = {int(k): v for k, v in (prev_state.get("cut_since") or {}).items()}
     _fundamentals = load_fundamentals()
 
