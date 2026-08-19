@@ -376,13 +376,38 @@ def push_snapshot_to_dashboard(suffix: str, body_json: str) -> None:
         logger.warning(f"Dashboard {suffix} ingest failed: {e}")
 
 
-def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
+# ─────────────────────────────────────────────────────────────────────────────
+# Dust filter for stake balances (added 2026-08-19)
+# ─────────────────────────────────────────────────────────────────────────────
+# taostats returns EVERY nonzero hotkey stake — including sub-dust residues
+# from old delegations that the on-chain UI + dashboard both hide. Without
+# filtering, the allocator reads that dust as a "held position", runs it
+# through the confirmation gate, and loops indefinitely trying to "exit"
+# something that's 0.0τ. This was the SN21 AdTAO ghost seen 2026-08-18.
+# Default 0.01τ is well below launch-scout minimum entry (1.0τ) so real
+# positions always pass. Set MIN_HOLDING_BALANCE_TAO=0 to disable.
+MIN_HOLDING_BALANCE_TAO = float(os.environ.get("MIN_HOLDING_BALANCE_TAO", "0.01"))
+
+
+def parse_stake_balances(
+    stakes: list[dict],
+    min_balance: float | None = None,
+) -> dict[int, float]:
     """netuid → balance in TAO from get_wallet_stakes() entries.
 
     balance_as_tao is an integer rao string → /1e9 (matches gordie.html's parse).
     One source of truth so holdings-resolution, the P&L gate, and the allocator
     all consume a SINGLE get_wallet_stakes fetch (LIVE_STATE #5 de-dup).
+
+    Dust filter (2026-08-19): stakes below `min_balance` TAO are treated as
+    non-existent. The filter runs AFTER cross-hotkey aggregation so multi-
+    hotkey micro-positions that sum above threshold still count. When dust
+    is dropped, a diagnostic line names the dropped netuids so a legitimate
+    sub-dust holding is never silently swallowed. Default from
+    MIN_HOLDING_BALANCE_TAO env var (0.01τ); pass 0 to disable.
     """
+    if min_balance is None:
+        min_balance = MIN_HOLDING_BALANCE_TAO
     out: dict[int, float] = {}
     for entry in stakes or []:
         nid = entry.get("netuid", entry.get("subnet_id"))
@@ -393,6 +418,14 @@ def parse_stake_balances(stakes: list[dict]) -> dict[int, float]:
         except (TypeError, ValueError):
             continue
         out[int(nid)] = out.get(int(nid), 0.0) + bal / 1e9  # += multi-hotkey safe (LS20 #4)
+    if min_balance > 0:
+        dropped = {k: round(v, 6) for k, v in out.items() if v < min_balance}
+        out = {k: v for k, v in out.items() if v >= min_balance}
+        if dropped:
+            logger.info(
+                f"parse_stake_balances: dropped {len(dropped)} dust position(s) "
+                f"below {min_balance}τ: {dropped}"
+            )
     return out
 
 
