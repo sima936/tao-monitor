@@ -26,9 +26,22 @@ Return contract:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger("chain_fetch")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dust filter (added 2026-08-20)
+# ─────────────────────────────────────────────────────────────────────────────
+# Same threshold and semantic as parse_stake_balances in run_scoring.py — a
+# sub-dust residue from an old delegation reads as a "held position" and loops
+# the allocator's confirmation gate forever ("SN21 AdTAO ghost" seen 2026-08-18).
+# The taostats-fallback path was already filtered; the chain-RPC PRIMARY path
+# was not, which is where the ghost was actually coming from. This closes it.
+# Env-tunable via the SAME variable so both paths track together; default 0.01τ
+# is well below launch-scout minimum entry (1.0τ), so real positions always pass.
+MIN_HOLDING_BALANCE_TAO = float(os.environ.get("MIN_HOLDING_BALANCE_TAO", "0.01"))
 
 import sys as _sys
 def _diag(msg: str) -> None:
@@ -114,7 +127,11 @@ def _as_float(x) -> float:
     return float(getattr(x, "tao", x))
 
 
-def stakes_to_tao_dict(stake_infos, prices) -> dict[int, float]:
+def stakes_to_tao_dict(
+    stake_infos,
+    prices,
+    min_balance: Optional[float] = None,
+) -> dict[int, float]:
     """PURE conversion (unit-testable offline, no chain):
 
         list[StakeInfo] + {netuid: price}  ->  {netuid: tao_value}
@@ -122,7 +139,18 @@ def stakes_to_tao_dict(stake_infos, prices) -> dict[int, float]:
     spot-valued (alpha * price) and multi-hotkey summed. netuid 0 (root) is TAO
     already, so its price is 1.0. A non-zero subnet with no price is skipped
     (can't be valued) rather than guessed.
+
+    Dust filter (2026-08-20): stakes below `min_balance` TAO are dropped AFTER
+    multi-hotkey aggregation. Matches the semantic in run_scoring's
+    parse_stake_balances so both the chain-RPC primary path and the taostats
+    fallback path filter identically. Prevents residual dust from old
+    delegations being treated as a "held position" by the allocator. Default
+    from MIN_HOLDING_BALANCE_TAO env var (0.01τ); pass 0 to disable. When
+    dropped, a diagnostic names the netuids so a legitimate sub-dust holding
+    is never silently swallowed.
     """
+    if min_balance is None:
+        min_balance = MIN_HOLDING_BALANCE_TAO
     out: dict[int, float] = {}
     for si in stake_infos or []:
         nid = int(si.netuid)
@@ -136,6 +164,15 @@ def stakes_to_tao_dict(stake_infos, prices) -> dict[int, float]:
                 continue
             price = _as_float(p)
         out[nid] = out.get(nid, 0.0) + alpha * price
+    if min_balance > 0:
+        dropped = {k: round(v, 6) for k, v in out.items() if v < min_balance}
+        out = {k: v for k, v in out.items() if v >= min_balance}
+        if dropped:
+            logger.info(
+                f"chain_fetch: dropped {len(dropped)} dust position(s) "
+                f"below {min_balance}τ: {dropped}"
+            )
+            _diag(f"dust dropped ({len(dropped)}) below {min_balance}τ: {dropped}")
     return out
 
 
