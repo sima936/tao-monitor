@@ -235,13 +235,32 @@ def get_last_bar_ts(netuid: int) -> Optional[int]:
 
 
 def stats() -> dict:
-    """Return a small summary dict for /status footers and diagnostics."""
+    """Return a small summary dict for /status footers and diagnostics.
+
+    Also emits a `[price_hist] db |` diagnostic line naming the resolved DB
+    path + inode + size + mtime. If Railway silently swaps in a snapshot /
+    volume gets remounted / env var flips, the inode changes and shows up
+    here immediately (2026-08-22 investigation: row count dropped 258 across
+    a single cron — physically impossible via normal writes, so we trace the
+    file identity every cycle from now on).
+    """
     _ensure_schema()
     with _connect() as conn:
         cur = conn.execute(
             "SELECT COUNT(*), COUNT(DISTINCT netuid), MIN(ts), MAX(ts) FROM price_bars"
         )
         total_rows, subnet_count, min_ts, max_ts = cur.fetchone()
+
+    # File-identity diag (never raises; wrapped so bad path can't kill the digest).
+    try:
+        st = DB_PATH.stat()
+        _diag(
+            f"db | path={DB_PATH} inode={st.st_ino} "
+            f"size={st.st_size} mtime={int(st.st_mtime)}"
+        )
+    except Exception as _e:
+        _diag(f"db | path={DB_PATH} STAT_FAILED ({type(_e).__name__}: {_e})")
+
     if total_rows == 0:
         return {"rows": 0, "subnets": 0, "span_days": 0.0}
     span_days = round((max_ts - min_ts) / 86400.0, 2) if min_ts and max_ts else 0.0
