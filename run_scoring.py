@@ -884,6 +884,34 @@ def _fetch_tao_close(years: int = 1):
     return None
 
 
+def pick_likely_dereg_target(rows: list, first_seen_map: dict | None,
+                             now_ts: float) -> tuple[dict | None, dict | None]:
+    """Lowest-MA subnets that are NOT immune: (target, runner_up).
+
+    rows: [{"netuid": int, "ma": float}, ...] already sorted ascending MA
+    (dereg order). Immune names can't be deregistered, so the real next
+    cascade target is the first non-immune row. Display-only.
+    """
+    ann = annotate_immunity(rows, first_seen_map, now_ts=now_ts)
+    elig = [c for c in ann if c.get("immunity_status") != "immune"]
+    return (elig[0] if elig else None), (elig[1] if len(elig) > 1 else None)
+
+
+def format_likely_target(target: dict | None, runner: dict | None,
+                         names: dict) -> str:
+    """'SN99 · Thirty Spokes (MA 0.0010τ) · next SN16 +4.3%' or ''."""
+    if not target:
+        return ""
+    t = f"SN{target['netuid']}"
+    nm = (names.get(target["netuid"]) or "").strip()
+    out = f"{t} · {nm}" if nm else t
+    out += f" (MA {target['ma']:.4f}τ)"
+    if runner and target["ma"] > 0:
+        gap = (runner["ma"] / target["ma"] - 1.0) * 100.0
+        out += f" · next SN{runner['netuid']} +{gap:.1f}%"
+    return out
+
+
 TAO_HYSTERESIS_BAND = float(os.environ.get("TAO_HYSTERESIS_BAND", "0.02"))
 
 
@@ -1487,6 +1515,20 @@ def run(
 
             # Current ranks {netuid: rank_1based}.
             current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(ranked)}
+            # Likely cascade target = lowest-MA non-immune subnet (display only).
+            _target_str = ""
+            try:
+                _tgt, _run = pick_likely_dereg_target(
+                    [{"netuid": int(m.subnet_id), "ma": float(m.moving_price)}
+                     for m in ranked[:10]],
+                    prev_state.get("known_netuids_first_seen") or {},
+                    time.time())
+                _target_str = format_likely_target(
+                    _tgt, _run,
+                    {int(k): (v or {}).get("name") or ""
+                     for k, v in (identity_map or {}).items()})
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"dereg likely-target failed (non-fatal): {e}")
             held_set = set(holdings or [])
             now_ts = time.time()
             last_alert = prev_state.get("dereg_last_alert_ts") or {}
@@ -1550,6 +1592,8 @@ def run(
                     url = (ident.get("url") or "").strip()
                     if url:
                         lines.append(f"   🌐 {_tg_link(url)}")
+                if _target_str:
+                    lines.append(f"🎯 Likely target (skips immune): {_target_str}")
                 if burn_cost is not None:
                     if burn_delta is not None and abs(burn_delta) >= 0.01:
                         sign = "+" if burn_delta >= 0 else ""
@@ -1570,9 +1614,9 @@ def run(
                 # tell watchlist is running even when nothing fires.
                 bottom3 = [(int(m.subnet_id), float(m.moving_price)) for m in ranked[:3]]
                 if burn_cost is not None:
-                    _diag("dereg", f"quiet — bottom3: {bottom3} · burn={burn_cost:.2f}τ")
+                    _diag("dereg", f"quiet — bottom3: {bottom3} · burn={burn_cost:.2f}τ · target={_target_str or 'n/a'}")
                 else:
-                    _diag("dereg", f"quiet — bottom3: {bottom3}")
+                    _diag("dereg", f"quiet — bottom3: {bottom3} · target={_target_str or 'n/a'}")
 
             # ─── Watchlist volatility alert ─────────────────────────────
             # SN90 case (30 July 2026): MA jumped 0.0000 → 0.0007τ and
