@@ -1521,14 +1521,31 @@ def run(
                           f"hist={len(_hist_out)} rate={_rate_str} "
                           f"(no future crossings)")
 
-            # Current ranks {netuid: rank_1based}.
-            current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(ranked)}
+            # Immune subnets can't be pruned, so they don't hold a dereg rank.
+            # Zero-MA re-regs (pre-launch, immune) otherwise fill the top of
+            # the list and push the real candidates off the watchlist.
+            # Rank = PRUNE ORDER among eligible subnets only.
+            try:
+                _imm_ids = {c["netuid"] for c in annotate_immunity(
+                    [{"netuid": int(m.subnet_id)} for m in ranked],
+                    prev_state.get("known_netuids_first_seen") or {},
+                    now_ts=time.time()) if c.get("immunity_status") == "immune"}
+            except Exception as e:  # noqa: BLE001  fail-open: old behaviour
+                logger.warning(f"dereg immunity split failed (non-fatal): {e}")
+                _imm_ids = set()
+            eligible = [m for m in ranked if int(m.subnet_id) not in _imm_ids]
+            immune_ranked = [m for m in ranked if int(m.subnet_id) in _imm_ids]
+            _imm_below = ([m for m in immune_ranked
+                           if float(m.moving_price) < float(eligible[0].moving_price)]
+                          if eligible else list(immune_ranked))
+            # Current ranks {netuid: rank_1based} — prune order.
+            current_ranks = {int(m.subnet_id): (i + 1) for i, m in enumerate(eligible)}
             # Likely cascade target = lowest-MA non-immune subnet (display only).
             _target_str = ""
             try:
                 _tgt, _run = pick_likely_dereg_target(
                     [{"netuid": int(m.subnet_id), "ma": float(m.moving_price)}
-                     for m in ranked[:10]],
+                     for m in ranked],
                     prev_state.get("known_netuids_first_seen") or {},
                     time.time())
                 _target_str = format_likely_target(
@@ -1545,7 +1562,7 @@ def run(
             OPP_RANK = 3         # any name in bottom 3 → alert
 
             fires: list[tuple[int, int, str, str]] = []  # (nid, rank, name, kind)
-            for m in ranked[:HELD_RISK_RANK]:
+            for m in eligible[:HELD_RISK_RANK]:
                 nid = int(m.subnet_id)
                 rank = current_ranks[nid]
                 name = (getattr(m, "name", "") or "").strip() or f"SN{nid}"
@@ -1600,6 +1617,10 @@ def run(
                     url = (ident.get("url") or "").strip()
                     if url:
                         lines.append(f"   🌐 {_tg_link(url)}")
+                if _imm_below:
+                    _ib = ", ".join(f"SN{int(m.subnet_id)}" for m in _imm_below[:5])
+                    _more = f" +{len(_imm_below) - 5}" if len(_imm_below) > 5 else ""
+                    lines.append(f"🛡️ {len(_imm_below)} immune lower (can't be pruned): {_ib}{_more}")
                 if _target_str:
                     lines.append(f"🎯 Likely target (skips immune): {_target_str}")
                 if burn_cost is not None:
@@ -1620,7 +1641,9 @@ def run(
             else:
                 # Silent-but-observable: show ranked state each cron so we can
                 # tell watchlist is running even when nothing fires.
-                bottom3 = [(int(m.subnet_id), float(m.moving_price)) for m in ranked[:3]]
+                bottom3 = [(int(m.subnet_id), float(m.moving_price)) for m in eligible[:3]]
+                if _imm_below:
+                    bottom3.append(f"+{len(_imm_below)} immune lower")
                 if burn_cost is not None:
                     _diag("dereg", f"quiet — bottom3: {bottom3} · burn={burn_cost:.2f}τ · target={_target_str or 'n/a'}")
                 else:
@@ -1650,7 +1673,7 @@ def run(
                 vol_last = prev_state.get("watchlist_last_ma") or {}
                 vol_fires: list[tuple[int, str, float, float]] = []
                 new_vol_last: dict = {}
-                for m in ranked[:10]:
+                for m in eligible[:10] + _imm_below:
                     nid = int(m.subnet_id)
                     curr_ma = float(m.moving_price)
                     prev_entry = vol_last.get(str(nid))
@@ -1708,7 +1731,7 @@ def run(
             prev_state["dereg_watchlist"] = [
                 {"netuid": int(m.subnet_id), "rank": current_ranks[int(m.subnet_id)],
                  "moving_price": round(float(m.moving_price), 6)}
-                for m in ranked[:10]
+                for m in eligible[:10]
             ]
             if burn_cost is not None:
                 prev_state["burn_cost_tao"] = round(float(burn_cost), 4)
