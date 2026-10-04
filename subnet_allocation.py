@@ -462,36 +462,33 @@ def compute_target_allocation(
             suppressed_new += 1
             continue  # non-Bull macro → no new exposure; leave discovery to Opportunities
         # ── A NEW (un-held) name the engine flags as a chaser / exit-zone is NOT an
-        #    entry: it's at/near its high (take_profit_flags: AT_RECENT_HIGH /
-        #    TAKE_PROFIT*) or explicitly CHASING. The scoring engine already drops
-        #    these from its buy list; the allocator must too, or it sizes an ENTER
-        #    into a name it simultaneously says to take profit on (SN77/SN14/SN83).
-        #    Don't size it — keep it VISIBLE in a flagged note so nothing is hidden;
-        #    the entry call is the operator's, not an auto-ENTER. Held names are
-        #    exempt (a holding at its high is a TRIM decision, handled below).
-        if held_ids_known and sid0 not in held_set:
-            _tp = getattr(s, "take_profit_flags", None) or []
-            _ef = getattr(s, "entry_flags", None) or []
+        #    entry (take_profit_flags / CHASING), and a NEW name with unknown
+        #    concentration is not auto-entered (Gini fail-closed). Both only apply
+        #    to names that would otherwise SURVIVE: a cut-worthy (Bear / below
+        #    floor) un-held name goes to `cut`, never to the "your call" entry
+        #    note (fix: the check used to run before tier classification, so a
+        #    Bear name with no Gini was offered as a manual entry). Held exempt.
+        def _new_name_flag(_s):
+            if not held_ids_known or int(getattr(_s, "subnet_id")) in held_set:
+                return None
+            _tp = getattr(_s, "take_profit_flags", None) or []
+            _ef = getattr(_s, "entry_flags", None) or []
             if _tp or any("CHASING" in str(fl).upper() for fl in _ef):
-                _why = "at/near high — take-profit zone" if _tp else "chasing — wait for pullback"
-                flagged_not_entered.append((sid0, getattr(s, "name", ""), _why))
-                continue
-            # Concentration fail-closed at the ENTER layer: a NEW name may only be
-            # entered if its REAL concentration is known. Unknown (0.5 placeholder
-            # / None) → don't auto-enter on unverified concentration; keep it
-            # visible. The #3 pre-filter already drops REAL ≥0.85, so this guards
-            # only the unfetched case. Held names are exempt (managed by trim/exit).
-            _g = getattr(s, "genie_score_raw", None)
+                return "at/near high — take-profit zone" if _tp else "chasing — wait for pullback"
+            _g = getattr(_s, "genie_score_raw", None)
             if _g is None or abs(_g - 0.5) < 1e-9:
-                flagged_not_entered.append(
-                    (sid0, getattr(s, "name", ""), "verify Gini — concentration not fetched")
-                )
-                continue
+                return "verify Gini — concentration not fetched"
+            return None
+
         health = float(getattr(s, "health_score", 0.0))
         s_regime = str(getattr(s, "markov_regime", "Unknown"))
         tier = classify_tier(health, s_regime, policy)
 
         if tier != Tier.EXIT:
+            _flag = _new_name_flag(s)
+            if _flag:
+                flagged_not_entered.append((sid0, getattr(s, "name", ""), _flag))
+                continue
             survivors.append((s, tier, health, s_regime))
             continue  # healthy → not cut-worthy → any prior streak auto-resets
                       # (simply by not being carried into new_cut_since)
@@ -506,6 +503,10 @@ def compute_target_allocation(
         # it does not touch cut_since. A tagged name in a real Bear regime falls
         # through to the time-gate below — and then exits once confirmed.
         if (sid0 in policy.conviction_tags) and not is_bear_cut:
+            _flag = _new_name_flag(s)
+            if _flag:
+                flagged_not_entered.append((sid0, getattr(s, "name", ""), _flag))
+                continue
             survivors.append((s, Tier.CONVICTION, health, s_regime))
             conviction_floored += 1
             continue
