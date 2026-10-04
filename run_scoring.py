@@ -909,6 +909,8 @@ def format_likely_target(target: dict | None, runner: dict | None,
     if runner and target["ma"] > 0:
         gap = (runner["ma"] / target["ma"] - 1.0) * 100.0
         out += f" · next SN{runner['netuid']} +{gap:.1f}%"
+    elif runner:  # zero-MA target: % gap undefined, still name the runner-up
+        out += f" · next SN{runner['netuid']} (MA {runner['ma']:.4f}τ)"
     return out
 
 
@@ -1431,14 +1433,20 @@ def run(
     # 24h rate limit per netuid so a borderline subnet doesn't spam.
     try:
         # Rank by moving_price ascending — lowest = #1 dereg candidate. Skip
-        # SN0 (root, exempt) and any subnet missing moving_price.
+        # SN0 (root, exempt) and any subnet missing moving_price (None = the
+        # taostats path). A chain-reported 0.0 is KEPT: an MA of zero (pre-
+        # launch / dead pool) is the FIRST prune candidate, not missing data.
+        # (fix: `> 0` hid these — cascade #9 pruned SN116 Memo off-list.)
         ranked = sorted(
             (m for m in all_metrics
              if int(m.subnet_id) != 0
              and getattr(m, "moving_price", None) is not None
-             and m.moving_price > 0),
+             and float(m.moving_price) >= 0),   # NaN/negative still dropped
             key=lambda m: float(m.moving_price),
         )
+        _zero_ma = [int(m.subnet_id) for m in ranked if float(m.moving_price) == 0.0]
+        if _zero_ma:
+            _diag("dereg", f"zero-MA subnets ranked first: {_zero_ma}")
         if not ranked:
             _diag("dereg", "skipped — no moving_price data (taostats path?)")
             logger.info("Dereg detector skipped: no moving_price data (taostats path?)")
